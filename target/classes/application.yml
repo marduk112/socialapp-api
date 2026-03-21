@@ -1,0 +1,54 @@
+spring:
+  application:
+    name: social-app
+
+  datasource:
+    url: jdbc:postgresql://localhost:5432/socialapp
+    username: socialapp
+    password: socialapp # I know that password shouldn't be here but it's for test purpose only
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    open-in-view: false
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+  neo4j:
+    uri: bolt://localhost:7687
+    authentication:
+      username: neo4j
+      password: socialapp123 # I know that password shouldn't be here but it's for test purpose only
+
+  kafka:
+    bootstrap-servers: localhost:29092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      properties:
+        spring.json.add.type.headers: false
+    consumer:
+      group-id: social-app-group
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "com.socialapp.*"
+
+server:
+  port: 8080
+
+kafka:
+  topics:
+    user-events: user-events
+    post-events: post-events
+    reaction-events: reaction-events
+
+logging:
+  level:
+    com.socialapp: DEBUG
+    org.springframework.kafka: INFO
