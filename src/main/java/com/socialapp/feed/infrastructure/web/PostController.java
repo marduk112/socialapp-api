@@ -17,7 +17,9 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/api/v1")
@@ -32,8 +34,11 @@ public class PostController {
     public ResponseEntity<List<PostResponse>> getFeed(
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "20") int size) {
+        var posts = postService.getFeed(page, size);
+        Set<UUID> authorIds = posts.stream().map(Post::getAuthorId).collect(Collectors.toSet());
+        var avatarMap = postService.getAuthorAvatarUrls(authorIds);
         return ResponseEntity.ok(
-                postService.getFeed(page, size).stream().map(PostResponse::from).toList()
+                posts.stream().map(p -> PostResponse.from(p, avatarMap.get(p.getAuthorId()))).toList()
         );
     }
 
@@ -46,20 +51,19 @@ public class PostController {
     @PostMapping("/posts")
     public ResponseEntity<PostResponse> createPost(@Valid @RequestBody CreatePostRequest req) {
         var post = postService.createPost(req.authorId(), req.authorUsername(), req.content(), req.imageUrl());
-        return ResponseEntity.status(HttpStatus.CREATED).body(PostResponse.from(post));
+        return ResponseEntity.status(HttpStatus.CREATED).body(enriched(post));
     }
 
     @GetMapping("/posts/{id}")
     public ResponseEntity<PostResponse> getPost(@PathVariable UUID id) {
-        return ResponseEntity.ok(PostResponse.from(postService.findById(id)));
+        return ResponseEntity.ok(enriched(postService.findById(id)));
     }
 
     @PutMapping("/posts/{id}")
     public ResponseEntity<PostResponse> updatePost(
             @PathVariable UUID id,
             @Valid @RequestBody UpdatePostRequest req) {
-        var post = postService.updatePost(id, req.requesterId(), req.content(), req.imageUrl());
-        return ResponseEntity.ok(PostResponse.from(post));
+        return ResponseEntity.ok(enriched(postService.updatePost(id, req.requesterId(), req.content(), req.imageUrl())));
     }
 
     @DeleteMapping("/posts/{id}")
@@ -76,7 +80,7 @@ public class PostController {
             @PathVariable UUID id,
             @Valid @RequestBody SharePostRequest req) {
         var post = postService.sharePost(id, req.authorId(), req.authorUsername(), req.comment());
-        return ResponseEntity.status(HttpStatus.CREATED).body(PostResponse.from(post));
+        return ResponseEntity.status(HttpStatus.CREATED).body(enriched(post));
     }
 
     // ── Reactions ─────────────────────────────────────────────────────────────
@@ -84,32 +88,28 @@ public class PostController {
     public ResponseEntity<PostResponse> likePost(
             @PathVariable UUID id,
             @RequestParam UUID userId) {
-        return ResponseEntity.ok(PostResponse.from(
-                postService.react(id, userId, ReactionEvent.ReactionType.LIKE, true)));
+        return ResponseEntity.ok(enriched(postService.react(id, userId, ReactionEvent.ReactionType.LIKE, true)));
     }
 
     @DeleteMapping("/posts/{id}/like")
     public ResponseEntity<PostResponse> unlikePost(
             @PathVariable UUID id,
             @RequestParam UUID userId) {
-        return ResponseEntity.ok(PostResponse.from(
-                postService.react(id, userId, ReactionEvent.ReactionType.LIKE, false)));
+        return ResponseEntity.ok(enriched(postService.react(id, userId, ReactionEvent.ReactionType.LIKE, false)));
     }
 
     @PostMapping("/posts/{id}/dislike")
     public ResponseEntity<PostResponse> dislikePost(
             @PathVariable UUID id,
             @RequestParam UUID userId) {
-        return ResponseEntity.ok(PostResponse.from(
-                postService.react(id, userId, ReactionEvent.ReactionType.DISLIKE, true)));
+        return ResponseEntity.ok(enriched(postService.react(id, userId, ReactionEvent.ReactionType.DISLIKE, true)));
     }
 
     @DeleteMapping("/posts/{id}/dislike")
     public ResponseEntity<PostResponse> removeDislikePost(
             @PathVariable UUID id,
             @RequestParam UUID userId) {
-        return ResponseEntity.ok(PostResponse.from(
-                postService.react(id, userId, ReactionEvent.ReactionType.DISLIKE, false)));
+        return ResponseEntity.ok(enriched(postService.react(id, userId, ReactionEvent.ReactionType.DISLIKE, false)));
     }
 
     // ── Comments ──────────────────────────────────────────────────────────────
@@ -147,6 +147,12 @@ public class PostController {
         return ResponseEntity.noContent().build();
     }
 
+    // ── Helpers ───────────────────────────────────────────────────────────────
+    private PostResponse enriched(Post post) {
+        String avatarUrl = postService.getAuthorAvatarUrl(post.getAuthorId()).orElse(null);
+        return PostResponse.from(post, avatarUrl);
+    }
+
     // ── DTOs ──────────────────────────────────────────────────────────────────
     record CreatePostRequest(
             UUID authorId,
@@ -179,15 +185,15 @@ public class PostController {
     ) {}
 
     record PostResponse(
-            UUID id, UUID authorId, String authorUsername,
+            UUID id, UUID authorId, String authorUsername, String authorAvatarUrl,
             String content, String imageUrl,
             long likesCount, long dislikesCount, long commentsCount,
             UUID originalPostId, String originalAuthorUsername, String originalContent,
             Instant createdAt, Instant updatedAt
     ) {
-        static PostResponse from(Post p) {
+        static PostResponse from(Post p, String authorAvatarUrl) {
             return new PostResponse(
-                    p.getId(), p.getAuthorId(), p.getAuthorUsername(),
+                    p.getId(), p.getAuthorId(), p.getAuthorUsername(), authorAvatarUrl,
                     p.getContent(), p.getImageUrl(),
                     p.getLikesCount(), p.getDislikesCount(), p.getCommentsCount(),
                     p.getOriginalPostId(), p.getOriginalAuthorUsername(), p.getOriginalContent(),

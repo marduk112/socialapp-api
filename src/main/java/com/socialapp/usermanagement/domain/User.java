@@ -63,6 +63,12 @@ public class User extends AggregateRoot<User> {
     }
 
     // ── Business methods ────────────────────────────────────────────────────
+    public void updateAvatarUrl(String avatarUrl) {
+        this.avatarUrl = avatarUrl;
+        this.updatedAt = Instant.now();
+        registerEvent(new UserUpdatedEvent(this.id, this.username, avatarUrl, this.bio));
+    }
+
     public void updateProfile(String username, String bio, String avatarUrl) {
         this.username = username;
         this.bio = bio;

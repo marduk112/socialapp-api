@@ -1,5 +1,7 @@
 package com.socialapp.feed.infrastructure.messaging;
 
+import com.socialapp.feed.domain.AuthorProfile;
+import com.socialapp.feed.domain.AuthorProfileRepository;
 import com.socialapp.feed.infrastructure.sse.FeedSseService;
 import com.socialapp.shared.events.PostCreatedEvent;
 import lombok.RequiredArgsConstructor;
@@ -10,6 +12,7 @@ import org.springframework.stereotype.Component;
 
 /**
  * Consumes PostCreatedEvents from Kafka and fans out to SSE subscribers.
+ * Avatar is resolved from author_profiles so it is always current.
  */
 @Component
 @RequiredArgsConstructor
@@ -17,6 +20,7 @@ import org.springframework.stereotype.Component;
 public class PostEventConsumer {
 
     private final FeedSseService feedSseService;
+    private final AuthorProfileRepository authorProfileRepository;
 
     @KafkaListener(
             topics = "${kafka.topics.post-events}",
@@ -25,6 +29,19 @@ public class PostEventConsumer {
     )
     public void onPostCreated(@Payload PostCreatedEvent event) {
         log.info("Received PostCreatedEvent postId={}, broadcasting via SSE", event.postId());
-        feedSseService.broadcast(event);
+
+        String avatarUrl = authorProfileRepository.findById(event.authorId())
+                .map(AuthorProfile::getAvatarUrl)
+                .orElse(null);
+
+        feedSseService.broadcast(new FeedSseService.PostSsePayload(
+                event.postId(),
+                event.authorId(),
+                event.authorUsername(),
+                avatarUrl,
+                event.content(),
+                event.imageUrl(),
+                event.occurredAt()
+        ));
     }
 }

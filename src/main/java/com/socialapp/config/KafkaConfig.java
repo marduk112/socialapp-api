@@ -100,4 +100,14 @@ public class KafkaConfig {
     public ConcurrentKafkaListenerContainerFactory<String, PostCreatedEvent> postEventListenerContainerFactory() {
         return containerFactory(PostCreatedEvent.class, "feed-sse-group");
     }
+
+    @Bean
+    public ConcurrentKafkaListenerContainerFactory<String, DomainEvent> feedUserEventListenerContainerFactory() {
+        return containerFactory(DomainEvent.class, "feed-avatar-group");
+    }
+
+    @Bean
+    public ConcurrentKafkaListenerContainerFactory<String, DomainEvent> feedUserUpdatedEventListenerContainerFactory() {
+        return containerFactory(DomainEvent.class, "feed-avatar-update-group");
+    }
 }

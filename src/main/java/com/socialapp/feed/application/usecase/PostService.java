@@ -8,8 +8,8 @@ import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.util.List;
-import java.util.UUID;
+import java.util.*;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
@@ -18,6 +18,7 @@ public class PostService {
     private final PostRepository postRepository;
     private final PostReactionRepository reactionRepository;
     private final CommentRepository commentRepository;
+    private final AuthorProfileRepository authorProfileRepository;
 
     // ── Posts CRUD ──────────────────────────────────────────────────────────────
 
@@ -69,6 +70,21 @@ public class PostService {
                 .orElseThrow(() -> new IllegalArgumentException("Post not found: " + originalPostId));
         var shared = Post.share(authorId, authorUsername, original, comment);
         return postRepository.save(shared);
+    }
+
+    // ── Avatar helpers ─────────────────────────────────────────────────────────
+
+    @Transactional(readOnly = true)
+    public Optional<String> getAuthorAvatarUrl(UUID authorId) {
+        return authorProfileRepository.findById(authorId).map(AuthorProfile::getAvatarUrl);
+    }
+
+    @Transactional(readOnly = true)
+    public Map<UUID, String> getAuthorAvatarUrls(Set<UUID> authorIds) {
+        return authorProfileRepository.findAllById(authorIds)
+                .stream()
+                .filter(p -> p.getAvatarUrl() != null)
+                .collect(Collectors.toMap(AuthorProfile::getAuthorId, AuthorProfile::getAvatarUrl));
     }
 
     // ── Reactions ──────────────────────────────────────────────────────────────

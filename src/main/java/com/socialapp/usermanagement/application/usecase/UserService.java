@@ -46,6 +46,14 @@ public class UserService implements CreateUserUseCase, UpdateUserUseCase {
         return userRepository.save(user);
     }
 
+    @Transactional
+    public User updateAvatar(UUID userId, String avatarUrl) {
+        var user = userRepository.findById(userId)
+                .orElseThrow(() -> new IllegalArgumentException("User not found: " + userId));
+        user.updateAvatarUrl(avatarUrl);
+        return userRepository.save(user);
+    }
+
     @Transactional(readOnly = true)
     public User findById(UUID id) {
         return userRepository.findById(id)
