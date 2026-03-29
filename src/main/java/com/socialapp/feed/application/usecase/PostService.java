@@ -18,6 +18,7 @@ public class PostService {
     private final PostRepository postRepository;
     private final PostReactionRepository reactionRepository;
     private final CommentRepository commentRepository;
+    private final CommentReactionRepository commentReactionRepository;
     private final AuthorProfileRepository authorProfileRepository;
 
     // ── Posts CRUD ──────────────────────────────────────────────────────────────
@@ -87,7 +88,7 @@ public class PostService {
                 .collect(Collectors.toMap(AuthorProfile::getAuthorId, AuthorProfile::getAvatarUrl));
     }
 
-    // ── Reactions ──────────────────────────────────────────────────────────────
+    // ── Post Reactions ─────────────────────────────────────────────────────────
 
     @Transactional
     public Post react(UUID postId, UUID userId, ReactionEvent.ReactionType type, boolean add) {
@@ -98,8 +99,7 @@ public class PostService {
                 .existsByPostIdAndUserIdAndReactionType(postId, userId, type);
 
         if (add) {
-            if (alreadyReacted) return post; // idempotent
-            // Remove opposite reaction first
+            if (alreadyReacted) return post;
             var oppositeType = type == ReactionEvent.ReactionType.LIKE
                     ? ReactionEvent.ReactionType.DISLIKE
                     : ReactionEvent.ReactionType.LIKE;
@@ -109,12 +109,11 @@ public class PostService {
                         if (oppositeType == ReactionEvent.ReactionType.LIKE) post.removeLike(userId);
                         else post.removeDislike(userId);
                     });
-
             reactionRepository.save(PostReaction.of(postId, userId, type));
             if (type == ReactionEvent.ReactionType.LIKE) post.addLike(userId);
             else post.addDislike(userId);
         } else {
-            if (!alreadyReacted) return post; // idempotent
+            if (!alreadyReacted) return post;
             reactionRepository.findByPostIdAndUserIdAndReactionType(postId, userId, type)
                     .ifPresent(reactionRepository::delete);
             if (type == ReactionEvent.ReactionType.LIKE) post.removeLike(userId);
@@ -127,12 +126,15 @@ public class PostService {
     // ── Comments ───────────────────────────────────────────────────────────────
 
     @Transactional
-    public Comment addComment(UUID postId, UUID authorId, String authorUsername, String content) {
+    public Comment addComment(UUID postId, UUID authorId, String authorUsername, String content, UUID parentCommentId) {
         var post = postRepository.findById(postId)
                 .orElseThrow(() -> new IllegalArgumentException("Post not found: " + postId));
-        var comment = Comment.create(postId, authorId, authorUsername, content);
-        post.incrementCommentsCount();
-        postRepository.save(post);
+        var comment = Comment.create(postId, authorId, authorUsername, content, parentCommentId);
+        // Only top-level comments contribute to the commentsCount
+        if (parentCommentId == null) {
+            post.incrementCommentsCount();
+            postRepository.save(post);
+        }
         return commentRepository.save(comment);
     }
 
@@ -160,11 +162,49 @@ public class PostService {
         if (!comment.getAuthorId().equals(requesterId)) {
             throw new SecurityException("Only the author can delete this comment");
         }
-        var post = postRepository.findById(comment.getPostId()).orElse(null);
-        if (post != null) {
-            post.decrementCommentsCount();
-            postRepository.save(post);
+        // Only decrement for top-level comments (replies cascade via FK)
+        if (comment.getParentCommentId() == null) {
+            var post = postRepository.findById(comment.getPostId()).orElse(null);
+            if (post != null) {
+                post.decrementCommentsCount();
+                postRepository.save(post);
+            }
         }
         commentRepository.delete(comment);
+    }
+
+    // ── Comment Reactions ──────────────────────────────────────────────────────
+
+    @Transactional
+    public Comment reactToComment(UUID commentId, UUID userId, ReactionEvent.ReactionType type, boolean add) {
+        var comment = commentRepository.findById(commentId)
+                .orElseThrow(() -> new IllegalArgumentException("Comment not found: " + commentId));
+
+        boolean alreadyReacted = commentReactionRepository
+                .existsByCommentIdAndUserIdAndReactionType(commentId, userId, type);
+
+        if (add) {
+            if (alreadyReacted) return comment;
+            var oppositeType = type == ReactionEvent.ReactionType.LIKE
+                    ? ReactionEvent.ReactionType.DISLIKE
+                    : ReactionEvent.ReactionType.LIKE;
+            commentReactionRepository.findByCommentIdAndUserIdAndReactionType(commentId, userId, oppositeType)
+                    .ifPresent(existing -> {
+                        commentReactionRepository.delete(existing);
+                        if (oppositeType == ReactionEvent.ReactionType.LIKE) comment.removeLike();
+                        else comment.removeDislike();
+                    });
+            commentReactionRepository.save(CommentReaction.of(commentId, userId, type));
+            if (type == ReactionEvent.ReactionType.LIKE) comment.addLike();
+            else comment.addDislike();
+        } else {
+            if (!alreadyReacted) return comment;
+            commentReactionRepository.findByCommentIdAndUserIdAndReactionType(commentId, userId, type)
+                    .ifPresent(commentReactionRepository::delete);
+            if (type == ReactionEvent.ReactionType.LIKE) comment.removeLike();
+            else comment.removeDislike();
+        }
+
+        return commentRepository.save(comment);
     }
 }

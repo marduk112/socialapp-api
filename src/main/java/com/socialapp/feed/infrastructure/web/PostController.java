@@ -117,8 +117,8 @@ public class PostController {
     public ResponseEntity<CommentResponse> addComment(
             @PathVariable UUID postId,
             @Valid @RequestBody CreateCommentRequest req) {
-        var comment = postService.addComment(postId, req.authorId(), req.authorUsername(), req.content());
-        return ResponseEntity.status(HttpStatus.CREATED).body(CommentResponse.from(comment));
+        var comment = postService.addComment(postId, req.authorId(), req.authorUsername(), req.content(), req.parentCommentId());
+        return ResponseEntity.status(HttpStatus.CREATED).body(enrichedComment(comment));
     }
 
     @GetMapping("/posts/{postId}/comments")
@@ -126,8 +126,11 @@ public class PostController {
             @PathVariable UUID postId,
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "50") int size) {
+        var comments = postService.getComments(postId, page, size);
+        Set<UUID> authorIds = comments.stream().map(Comment::getAuthorId).collect(Collectors.toSet());
+        var avatarMap = postService.getAuthorAvatarUrls(authorIds);
         return ResponseEntity.ok(
-                postService.getComments(postId, page, size).stream().map(CommentResponse::from).toList()
+                comments.stream().map(c -> CommentResponse.from(c, avatarMap.get(c.getAuthorId()))).toList()
         );
     }
 
@@ -136,7 +139,7 @@ public class PostController {
             @PathVariable UUID commentId,
             @Valid @RequestBody UpdateCommentRequest req) {
         var comment = postService.updateComment(commentId, req.requesterId(), req.content());
-        return ResponseEntity.ok(CommentResponse.from(comment));
+        return ResponseEntity.ok(enrichedComment(comment));
     }
 
     @DeleteMapping("/comments/{commentId}")
@@ -147,10 +150,47 @@ public class PostController {
         return ResponseEntity.noContent().build();
     }
 
+    @PostMapping("/comments/{commentId}/like")
+    public ResponseEntity<CommentResponse> likeComment(
+            @PathVariable UUID commentId,
+            @RequestParam UUID userId) {
+        return ResponseEntity.ok(enrichedComment(
+                postService.reactToComment(commentId, userId, ReactionEvent.ReactionType.LIKE, true)));
+    }
+
+    @DeleteMapping("/comments/{commentId}/like")
+    public ResponseEntity<CommentResponse> unlikeComment(
+            @PathVariable UUID commentId,
+            @RequestParam UUID userId) {
+        return ResponseEntity.ok(enrichedComment(
+                postService.reactToComment(commentId, userId, ReactionEvent.ReactionType.LIKE, false)));
+    }
+
+    @PostMapping("/comments/{commentId}/dislike")
+    public ResponseEntity<CommentResponse> dislikeComment(
+            @PathVariable UUID commentId,
+            @RequestParam UUID userId) {
+        return ResponseEntity.ok(enrichedComment(
+                postService.reactToComment(commentId, userId, ReactionEvent.ReactionType.DISLIKE, true)));
+    }
+
+    @DeleteMapping("/comments/{commentId}/dislike")
+    public ResponseEntity<CommentResponse> removeDislikeComment(
+            @PathVariable UUID commentId,
+            @RequestParam UUID userId) {
+        return ResponseEntity.ok(enrichedComment(
+                postService.reactToComment(commentId, userId, ReactionEvent.ReactionType.DISLIKE, false)));
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
     private PostResponse enriched(Post post) {
         String avatarUrl = postService.getAuthorAvatarUrl(post.getAuthorId()).orElse(null);
         return PostResponse.from(post, avatarUrl);
+    }
+
+    private CommentResponse enrichedComment(Comment comment) {
+        String avatarUrl = postService.getAuthorAvatarUrl(comment.getAuthorId()).orElse(null);
+        return CommentResponse.from(comment, avatarUrl);
     }
 
     // ── DTOs ──────────────────────────────────────────────────────────────────
@@ -176,7 +216,8 @@ public class PostController {
     record CreateCommentRequest(
             UUID authorId,
             @NotBlank String authorUsername,
-            @NotBlank @Size(max = 2000) String content
+            @NotBlank @Size(max = 2000) String content,
+            UUID parentCommentId
     ) {}
 
     record UpdateCommentRequest(
@@ -203,13 +244,13 @@ public class PostController {
     }
 
     record CommentResponse(
-            UUID id, UUID postId, UUID authorId, String authorUsername,
-            String content, Instant createdAt, Instant updatedAt
+            UUID id, UUID postId, UUID parentCommentId, UUID authorId, String authorUsername, String authorAvatarUrl,
+            String content, int likesCount, int dislikesCount, Instant createdAt, Instant updatedAt
     ) {
-        static CommentResponse from(Comment c) {
+        static CommentResponse from(Comment c, String authorAvatarUrl) {
             return new CommentResponse(
-                    c.getId(), c.getPostId(), c.getAuthorId(), c.getAuthorUsername(),
-                    c.getContent(), c.getCreatedAt(), c.getUpdatedAt()
+                    c.getId(), c.getPostId(), c.getParentCommentId(), c.getAuthorId(), c.getAuthorUsername(), authorAvatarUrl,
+                    c.getContent(), c.getLikesCount(), c.getDislikesCount(), c.getCreatedAt(), c.getUpdatedAt()
             );
         }
     }
