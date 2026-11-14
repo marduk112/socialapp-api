@@ -34,12 +34,12 @@ public class UserPersistenceAdapter implements UserRepository {
 
     @Override
     public Optional<User> findByEmail(String email) {
-        return jpaRepository.findByEmailIgnoreCase(email);
+        return jpaRepository.findByEmail(User.normalizeEmail(email));
     }
 
     @Override
     public boolean existsByEmail(String email) {
-        return jpaRepository.existsByEmail(email);
+        return jpaRepository.existsByEmail(User.normalizeEmail(email));
     }
 
     @Override

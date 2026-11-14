@@ -1,10 +1,10 @@
 package com.socialapp.feed.application.usecase;
 
 import com.socialapp.feed.domain.*;
+import com.socialapp.shared.domain.NotFoundException;
 import com.socialapp.shared.events.ReactionEvent;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.PageRequest;
-import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -20,57 +20,202 @@ public class PostService {
     private final CommentRepository commentRepository;
     private final CommentReactionRepository commentReactionRepository;
     private final AuthorProfileRepository authorProfileRepository;
+    private final PostHashtagRepository hashtagRepository;
+    private final PostMentionRepository mentionRepository;
 
     // ── Posts CRUD ──────────────────────────────────────────────────────────────
 
     @Transactional
     public Post createPost(UUID authorId, String authorUsername, String content, String imageUrl) {
-        var post = Post.create(authorId, authorUsername, content, imageUrl);
-        return postRepository.save(post);
-    }
-
-    @Transactional(readOnly = true)
-    public List<Post> getFeed(int page, int size) {
-        return postRepository.findAll(PageRequest.of(page, size,
-                Sort.by("createdAt").descending()))
-                .getContent();
+        var post = Post.create(authorId, currentUsername(authorId, authorUsername), content, imageUrl);
+        return saveWithTextIndex(post);
     }
 
     @Transactional(readOnly = true)
     public Post findById(UUID id) {
-        return postRepository.findById(id)
-                .orElseThrow(() -> new IllegalArgumentException("Post not found: " + id));
+        return postRepository.findById(id).orElseThrow(() -> postNotFound(id));
     }
 
+    /**
+     * Edits the post (a QUOTE: its comment) and replaces its hashtags and mentions. The row is locked so concurrent edits of the
+     * same post (e.g. a double submit) replace the index sets one after the other instead of colliding.
+     */
     @Transactional
     public Post updatePost(UUID postId, UUID requesterId, String content, String imageUrl) {
-        var post = postRepository.findById(postId)
-                .orElseThrow(() -> new IllegalArgumentException("Post not found: " + postId));
-        if (!post.getAuthorId().equals(requesterId)) {
-            throw new SecurityException("Only the author can edit this post");
-        }
-        post.edit(content, imageUrl);
-        return postRepository.save(post);
+        // Ownership first, then type (a REPOST cannot be edited: 409), then content rules (Post#edit).
+        var post = postRepository.findByIdForUpdate(postId).orElseThrow(() -> postNotFound(postId));
+        post.edit(requesterId, content, imageUrl);
+        return saveWithTextIndex(post);
     }
 
+    /**
+     * Deletes a post (also a repost or quote) of the requester. Deleting a post that others reposted/quoted also
+     * deletes its REPOSTs and detaches its QUOTEs (snapshot cleared; the FK nulls their {@code original_post_id},
+     * so they show "original unavailable"). The row is locked first, which serialises the deletion with
+     * concurrent reposts/quotes of it (they lock the same row), so no repost can slip in and be orphaned.
+     */
     @Transactional
     public void deletePost(UUID postId, UUID requesterId) {
-        var post = postRepository.findById(postId)
-                .orElseThrow(() -> new IllegalArgumentException("Post not found: " + postId));
-        if (!post.getAuthorId().equals(requesterId)) {
-            throw new SecurityException("Only the author can delete this post");
+        var post = postRepository.findByIdForUpdate(postId).orElseThrow(() -> postNotFound(postId));
+        post.ensureAuthoredBy(requesterId, "delete");
+        if (!post.isRepost()) { // nothing ever points at a REPOST (flattened)
+            postRepository.deleteRepostsOf(postId);
+            postRepository.detachQuotesOf(postId);
         }
         postRepository.delete(post);
     }
 
-    // ── Sharing ────────────────────────────────────────────────────────────────
+    // ── Reposts and quotes ─────────────────────────────────────────────────────
 
+    /** Result of {@link #repost}: the caller's repost and whether this call created it (201) or found it (200). */
+    public record RepostResult(Post post, boolean created) {}
+
+    /**
+     * Reposts {@code targetId} (a repost item resolves to its original). Idempotent per (author, original): a
+     * second call returns the existing repost. The original's row is locked, so concurrent reposts by the same
+     * user (double click) are serialised and the second one finds the first one's row (same approach as
+     * reactions); the V18 partial unique index is the backstop.
+     *
+     * @throws NotFoundException unknown/deleted target
+     */
     @Transactional
-    public Post sharePost(UUID originalPostId, UUID authorId, String authorUsername, String comment) {
-        var original = postRepository.findById(originalPostId)
-                .orElseThrow(() -> new IllegalArgumentException("Post not found: " + originalPostId));
-        var shared = Post.share(authorId, authorUsername, original, comment);
-        return postRepository.save(shared);
+    public RepostResult repost(UUID targetId, UUID authorId, String authorUsername) {
+        var original = lockTarget(targetId);
+        var existing = postRepository.findRepost(authorId, original.getId());
+        if (existing.isPresent()) return new RepostResult(existing.get(), false);
+        var repost = Post.repost(authorId, currentUsername(authorId, authorUsername), original);
+        return new RepostResult(saveWithTextIndex(repost), true);
+    }
+
+    /**
+     * Removes the caller's repost of {@code targetId} (an original, or a repost item resolved to its original).
+     * Idempotent: no repost, or an unknown id, is a no-op.
+     */
+    @Transactional
+    public void undoRepost(UUID targetId, UUID authorId) {
+        var item = postRepository.findById(targetId);
+        if (item.isEmpty()) return;
+        var originalId = item.get().repostTargetId();
+        if (originalId.isEmpty()) return;
+        // Same lock as repost(), so an undo racing a repost of the same original is serialised with it.
+        if (postRepository.findByIdForUpdate(originalId.get()).isEmpty()) return;
+        postRepository.deleteRepost(authorId, originalId.get());
+    }
+
+    /**
+     * Quotes {@code targetId} (a repost item resolves to its original) with a required comment; hashtags and
+     * mentions of the comment are indexed like a post's. Unlimited per user.
+     *
+     * @throws NotFoundException unknown/deleted target
+     * @throws IllegalArgumentException blank comment or longer than {@link Post#MAX_CONTENT_LENGTH} code points
+     */
+    @Transactional
+    public Post quote(UUID targetId, UUID authorId, String authorUsername, String comment) {
+        var original = lockTarget(targetId);
+        var quote = Post.quote(authorId, currentUsername(authorId, authorUsername), original, comment);
+        return saveWithTextIndex(quote);
+    }
+
+    /**
+     * Deprecated {@code POST /posts/{id}/share}: a blank/missing comment means repost (idempotent), otherwise
+     * quote.
+     */
+    @Deprecated
+    @Transactional
+    public RepostResult sharePost(UUID targetId, UUID authorId, String authorUsername, String comment) {
+        if (comment == null || comment.isBlank()) return repost(targetId, authorId, authorUsername);
+        return new RepostResult(quote(targetId, authorId, authorUsername, comment), true);
+    }
+
+    /**
+     * Resolves the post a repost/quote of {@code targetId} must point at (a REPOST item -> its original) and locks
+     * its row. The item itself is read without a lock: locking a repost row and then its original would invert
+     * the lock order of {@link #deletePost} (original, then its reposts) and could deadlock.
+     */
+    private Post lockTarget(UUID targetId) {
+        var item = postRepository.findById(targetId).orElseThrow(() -> postNotFound(targetId));
+        var originalId = item.repostTargetId().orElseThrow(() -> postNotFound(targetId));
+        return postRepository.findByIdForUpdate(originalId).orElseThrow(() -> postNotFound(targetId));
+    }
+
+    // ── Read model ─────────────────────────────────────────────────────────────
+
+    /**
+     * The posts as seen by {@code viewerId} (null = nobody, e.g. an SSE broadcast), in the given order, with
+     * author avatar, hashtags, mentions, repost/quote counters, the viewer's repost flag and reaction, and the
+     * embedded original of reposts/quotes (see {@link PostView#original()}).
+     *
+     * <p>Constant number of queries regardless of the number of posts: at most two for the originals (the
+     * embedded originals, then the quoted posts of reposted quotes), then one IN query each for avatars,
+     * hashtags, mentions, repost/quote counts and - with a viewer - reposted flags and reactions, all covering the
+     * page posts and their originals together. No N+1.
+     */
+    @Transactional(readOnly = true)
+    public List<PostView> views(List<Post> posts, UUID viewerId) {
+        if (posts.isEmpty()) return List.of();
+        Map<UUID, Post> byId = new LinkedHashMap<>();
+        posts.forEach(p -> byId.putIfAbsent(p.getId(), p));
+
+        // Level 1: originals of reposts/quotes.
+        loadMissing(byId, posts.stream()
+                .filter(Post::embedsOriginal)
+                .map(Post::getOriginalPostId));
+        // Level 2: only a REPOST of a QUOTE shows the quoted post inside the quote.
+        loadMissing(byId, posts.stream()
+                .filter(Post::isRepost)
+                .map(p -> byId.get(p.getOriginalPostId()))
+                .filter(o -> o != null && o.getType() == PostType.QUOTE)
+                .map(Post::getOriginalPostId));
+
+        var all = List.copyOf(byId.values());
+        var ids = all.stream().map(Post::getId).toList();
+        var avatars = getAuthorAvatarUrls(all.stream().map(Post::getAuthorId).collect(Collectors.toSet()));
+        var hashtags = hashtagRepository.findByPostIds(ids);
+        var mentions = mentionRepository.findByPostIds(ids);
+        Map<UUID, long[]> counts = new HashMap<>(); // [reposts, quotes]
+        for (Object[] row : postRepository.countRepostsAndQuotes(ids)) {
+            var c = counts.computeIfAbsent((UUID) row[0], k -> new long[2]);
+            long n = ((Number) row[2]).longValue();
+            if (row[1] == PostType.REPOST) c[0] += n;
+            else if (row[1] == PostType.QUOTE) c[1] += n;
+        }
+        Set<UUID> reposted = viewerId == null ? Set.of()
+                : new HashSet<>(postRepository.findRepostedOriginalIds(viewerId, ids));
+        Map<UUID, ReactionEvent.ReactionType> reactions = new HashMap<>();
+        if (viewerId != null) {
+            for (var r : reactionRepository.findByUserIdAndPostIdIn(viewerId, ids)) {
+                reactions.merge(r.getPostId(), r.getReactionType(),
+                        (a, b) -> a == ReactionEvent.ReactionType.LIKE ? a : b);
+            }
+        }
+
+        java.util.function.BiFunction<Post, PostView, PostView> view = (p, original) -> {
+            var c = counts.getOrDefault(p.getId(), new long[2]);
+            return new PostView(p, avatars.get(p.getAuthorId()),
+                    hashtags.getOrDefault(p.getId(), List.of()),
+                    mentions.getOrDefault(p.getId(), List.of()),
+                    c[0], c[1], reposted.contains(p.getId()), reactions.get(p.getId()), original);
+        };
+        return posts.stream().map(p -> {
+            var original = p.embedsOriginal() ? byId.get(p.getOriginalPostId()) : null;
+            if (original == null) return view.apply(p, null);
+            var quoted = p.isRepost() && original.getType() == PostType.QUOTE
+                    ? byId.get(original.getOriginalPostId()) : null;
+            var quotedView = quoted == null ? null : view.apply(quoted, null);
+            return view.apply(p, view.apply(original, quotedView));
+        }).toList();
+    }
+
+    @Transactional(readOnly = true)
+    public PostView view(Post post, UUID viewerId) {
+        return views(List.of(post), viewerId).get(0);
+    }
+
+    /** Adds the posts among {@code ids} that are not in {@code byId} yet, with ONE query (none if nothing new). */
+    private void loadMissing(Map<UUID, Post> byId, java.util.stream.Stream<UUID> ids) {
+        var missing = ids.filter(id -> id != null && !byId.containsKey(id)).collect(Collectors.toSet());
+        if (missing.isEmpty()) return;
+        postRepository.findAllById(missing).forEach(p -> byId.putIfAbsent(p.getId(), p));
     }
 
     // ── Avatar helpers ─────────────────────────────────────────────────────────
@@ -90,36 +235,25 @@ public class PostService {
 
     // ── Post Reactions ─────────────────────────────────────────────────────────
 
+    /**
+     * Idempotent like/dislike toggle. The post row is locked for the transaction, so concurrent
+     * reactions (including a double-click) are serialised: no lost counter updates and no duplicate
+     * reaction rows (the second request sees the first one's row and becomes a no-op).
+     */
     @Transactional
     public Post react(UUID postId, UUID userId, ReactionEvent.ReactionType type, boolean add) {
-        var post = postRepository.findById(postId)
-                .orElseThrow(() -> new IllegalArgumentException("Post not found: " + postId));
+        var post = postRepository.findByIdForUpdate(postId).orElseThrow(() -> postNotFound(postId));
 
-        boolean alreadyReacted = reactionRepository
-                .existsByPostIdAndUserIdAndReactionType(postId, userId, type);
+        var existing = reactionRepository.findByPostIdAndUserId(postId, userId);
+        var change = post.react(userId, typesOf(existing, PostReaction::getReactionType), type, add);
+        if (change.isNoop()) return post;
 
-        if (add) {
-            if (alreadyReacted) return post;
-            var oppositeType = type == ReactionEvent.ReactionType.LIKE
-                    ? ReactionEvent.ReactionType.DISLIKE
-                    : ReactionEvent.ReactionType.LIKE;
-            reactionRepository.findByPostIdAndUserIdAndReactionType(postId, userId, oppositeType)
-                    .ifPresent(existing -> {
-                        reactionRepository.delete(existing);
-                        if (oppositeType == ReactionEvent.ReactionType.LIKE) post.removeLike(userId);
-                        else post.removeDislike(userId);
-                    });
-            reactionRepository.save(PostReaction.of(postId, userId, type));
-            if (type == ReactionEvent.ReactionType.LIKE) post.addLike(userId);
-            else post.addDislike(userId);
-        } else {
-            if (!alreadyReacted) return post;
-            reactionRepository.findByPostIdAndUserIdAndReactionType(postId, userId, type)
-                    .ifPresent(reactionRepository::delete);
-            if (type == ReactionEvent.ReactionType.LIKE) post.removeLike(userId);
-            else post.removeDislike(userId);
+        reactionRepository.deleteAll(existing.stream()
+                .filter(r -> change.removed().contains(r.getReactionType()))
+                .toList());
+        if (change.added() != null) {
+            reactionRepository.save(PostReaction.of(postId, userId, change.added()));
         }
-
         return postRepository.save(post);
     }
 
@@ -127,9 +261,19 @@ public class PostService {
 
     @Transactional
     public Comment addComment(UUID postId, UUID authorId, String authorUsername, String content, UUID parentCommentId) {
-        var post = postRepository.findById(postId)
-                .orElseThrow(() -> new IllegalArgumentException("Post not found: " + postId));
-        var comment = Comment.create(postId, authorId, authorUsername, content, parentCommentId);
+        // Lock order is always post -> comment (same as deleteComment) to avoid deadlocks.
+        // The post lock is needed for commentsCount and turns a missing post into a 404, not an FK error.
+        var post = postRepository.findByIdForUpdate(postId).orElseThrow(() -> postNotFound(postId));
+        if (parentCommentId != null) {
+            // Locked so a concurrent delete of the parent cannot slip in between check and insert.
+            var parent = commentRepository.findByIdForUpdate(parentCommentId)
+                    .orElseThrow(() -> new NotFoundException("Parent comment not found: " + parentCommentId));
+            if (!parent.belongsTo(postId)) {
+                throw new IllegalArgumentException("Parent comment " + parentCommentId
+                        + " does not belong to post " + postId);
+            }
+        }
+        var comment = Comment.create(postId, authorId, currentUsername(authorId, authorUsername), content, parentCommentId);
         // Only top-level comments contribute to the commentsCount
         if (parentCommentId == null) {
             post.incrementCommentsCount();
@@ -146,65 +290,96 @@ public class PostService {
 
     @Transactional
     public Comment updateComment(UUID commentId, UUID requesterId, String content) {
-        var comment = commentRepository.findById(commentId)
-                .orElseThrow(() -> new IllegalArgumentException("Comment not found: " + commentId));
-        if (!comment.getAuthorId().equals(requesterId)) {
-            throw new SecurityException("Only the author can edit this comment");
-        }
-        comment.edit(content);
+        var comment = commentRepository.findById(commentId).orElseThrow(() -> commentNotFound(commentId));
+        comment.edit(requesterId, content);
         return commentRepository.save(comment);
     }
 
     @Transactional
     public void deleteComment(UUID commentId, UUID requesterId) {
-        var comment = commentRepository.findById(commentId)
-                .orElseThrow(() -> new IllegalArgumentException("Comment not found: " + commentId));
-        if (!comment.getAuthorId().equals(requesterId)) {
-            throw new SecurityException("Only the author can delete this comment");
-        }
+        var comment = commentRepository.findById(commentId).orElseThrow(() -> commentNotFound(commentId));
+        comment.ensureAuthoredBy(requesterId, "delete");
         // Only decrement for top-level comments (replies cascade via FK)
         if (comment.getParentCommentId() == null) {
-            var post = postRepository.findById(comment.getPostId()).orElse(null);
-            if (post != null) {
+            postRepository.findByIdForUpdate(comment.getPostId()).ifPresent(post -> {
                 post.decrementCommentsCount();
                 postRepository.save(post);
-            }
+            });
         }
         commentRepository.delete(comment);
     }
 
     // ── Comment Reactions ──────────────────────────────────────────────────────
 
+    /** Idempotent like/dislike toggle on a comment; serialised per comment by a row lock (see {@link #react}). */
     @Transactional
     public Comment reactToComment(UUID commentId, UUID userId, ReactionEvent.ReactionType type, boolean add) {
-        var comment = commentRepository.findById(commentId)
-                .orElseThrow(() -> new IllegalArgumentException("Comment not found: " + commentId));
+        var comment = commentRepository.findByIdForUpdate(commentId).orElseThrow(() -> commentNotFound(commentId));
 
-        boolean alreadyReacted = commentReactionRepository
-                .existsByCommentIdAndUserIdAndReactionType(commentId, userId, type);
+        var existing = commentReactionRepository.findByCommentIdAndUserId(commentId, userId);
+        var change = comment.react(typesOf(existing, CommentReaction::getReactionType), type, add);
+        if (change.isNoop()) return comment;
 
-        if (add) {
-            if (alreadyReacted) return comment;
-            var oppositeType = type == ReactionEvent.ReactionType.LIKE
-                    ? ReactionEvent.ReactionType.DISLIKE
-                    : ReactionEvent.ReactionType.LIKE;
-            commentReactionRepository.findByCommentIdAndUserIdAndReactionType(commentId, userId, oppositeType)
-                    .ifPresent(existing -> {
-                        commentReactionRepository.delete(existing);
-                        if (oppositeType == ReactionEvent.ReactionType.LIKE) comment.removeLike();
-                        else comment.removeDislike();
-                    });
-            commentReactionRepository.save(CommentReaction.of(commentId, userId, type));
-            if (type == ReactionEvent.ReactionType.LIKE) comment.addLike();
-            else comment.addDislike();
-        } else {
-            if (!alreadyReacted) return comment;
-            commentReactionRepository.findByCommentIdAndUserIdAndReactionType(commentId, userId, type)
-                    .ifPresent(commentReactionRepository::delete);
-            if (type == ReactionEvent.ReactionType.LIKE) comment.removeLike();
-            else comment.removeDislike();
+        commentReactionRepository.deleteAll(existing.stream()
+                .filter(r -> change.removed().contains(r.getReactionType()))
+                .toList());
+        if (change.added() != null) {
+            commentReactionRepository.save(CommentReaction.of(commentId, userId, change.added()));
         }
-
         return commentRepository.save(comment);
+    }
+
+    // ── Helpers ────────────────────────────────────────────────────────────────
+
+    /**
+     * Saves the post and (re)writes its hashtags and resolved mentions in the same transaction. The post is
+     * flushed first because the index rows reference (and copy {@code created_at} from) its row.
+     */
+    private Post saveWithTextIndex(Post post) {
+        var saved = postRepository.save(post);
+        postRepository.flush();
+        hashtagRepository.replace(saved.getId(), saved.hashtags());
+        mentionRepository.replace(saved.getId(), resolveMentions(saved));
+        return saved;
+    }
+
+    /**
+     * Resolves the post's {@code @name} candidates against Feed's own {@code author_profiles} projection with
+     * one batched lookup (no call into UserManagement; see {@link MentionLookup}, shared with the legacy backfill).
+     * Unknown/ambiguous names and self-mentions are dropped.
+     */
+    private List<Mention> resolveMentions(Post post) {
+        var candidates = post.mentionCandidates();
+        if (candidates.isEmpty()) return List.of();
+        var keys = candidates.stream().map(MentionParser::key).collect(Collectors.toSet());
+        return MentionParser.resolve(candidates, MentionLookup.knownUsers(authorProfileRepository, keys),
+                post.getAuthorId());
+    }
+
+    /**
+     * The username to denormalise into new posts/comments. Feed's own projection (kept current by
+     * user-events) wins over the caller's token claim, which can be stale after a rename until the
+     * user logs in again. Falls back to the token when no projection exists yet.
+     */
+    private String currentUsername(UUID authorId, String tokenUsername) {
+        return authorProfileRepository.findById(authorId)
+                .map(AuthorProfile::getUsername)
+                .filter(u -> !u.isBlank())
+                .orElse(tokenUsername);
+    }
+
+    private static <R> Set<ReactionEvent.ReactionType> typesOf(
+            List<R> reactions, java.util.function.Function<R, ReactionEvent.ReactionType> type) {
+        var types = EnumSet.noneOf(ReactionEvent.ReactionType.class);
+        reactions.forEach(r -> types.add(type.apply(r)));
+        return types;
+    }
+
+    private static NotFoundException postNotFound(UUID id) {
+        return new NotFoundException("Post not found: " + id);
+    }
+
+    private static NotFoundException commentNotFound(UUID id) {
+        return new NotFoundException("Comment not found: " + id);
     }
 }

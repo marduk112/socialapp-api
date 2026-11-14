@@ -3,9 +3,13 @@ package com.socialapp.socialgraph.infrastructure.web;
 import com.socialapp.socialgraph.application.command.FollowUserCommand;
 import com.socialapp.socialgraph.application.usecase.SocialGraphService;
 import com.socialapp.socialgraph.domain.UserNode;
+import com.socialapp.shared.security.AuthenticatedUser;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
 import java.util.UUID;
@@ -18,14 +22,18 @@ public class SocialGraphController {
     private final SocialGraphService socialGraphService;
 
     @PostMapping("/follow")
-    public ResponseEntity<Void> follow(@RequestBody FollowRequest request) {
-        socialGraphService.follow(new FollowUserCommand(request.followerId(), request.followeeId()));
+    public ResponseEntity<Void> follow(
+            @AuthenticationPrincipal AuthenticatedUser me,
+            @RequestBody FollowRequest request) {
+        socialGraphService.follow(new FollowUserCommand(me.id(), requireFollowee(request)));
         return ResponseEntity.ok().build();
     }
 
     @DeleteMapping("/follow")
-    public ResponseEntity<Void> unfollow(@RequestBody FollowRequest request) {
-        socialGraphService.unfollow(new FollowUserCommand(request.followerId(), request.followeeId()));
+    public ResponseEntity<Void> unfollow(
+            @AuthenticationPrincipal AuthenticatedUser me,
+            @RequestBody FollowRequest request) {
+        socialGraphService.unfollow(new FollowUserCommand(me.id(), requireFollowee(request)));
         return ResponseEntity.noContent().build();
     }
 
@@ -45,14 +53,25 @@ public class SocialGraphController {
         );
     }
 
+    /** Read-only query; {@code followerId} defaults to the caller when omitted. */
     @GetMapping("/is-following")
     public ResponseEntity<Boolean> isFollowing(
-            @RequestParam String followerId,
+            @AuthenticationPrincipal AuthenticatedUser me,
+            @RequestParam(required = false) String followerId,
             @RequestParam String followeeId) {
-        return ResponseEntity.ok(socialGraphService.isFollowing(followerId, followeeId));
+        String follower = followerId == null || followerId.isBlank() ? me.getName() : followerId;
+        return ResponseEntity.ok(socialGraphService.isFollowing(follower, followeeId));
     }
 
-    record FollowRequest(UUID followerId, UUID followeeId) {}
+    private static UUID requireFollowee(FollowRequest request) {
+        if (request == null || request.followeeId() == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "followeeId is required");
+        }
+        return request.followeeId();
+    }
+
+    /** {@code followerId} is ignored if sent: the follower is always the authenticated caller. */
+    record FollowRequest(UUID followeeId) {}
 
     record UserNodeResponse(String userId, String username, String avatarUrl) {
         static UserNodeResponse from(UserNode node) {

@@ -5,8 +5,8 @@ target/
 **/src/test/**/target/
 uploads/
 
-# Maven wrapper
-.mvn/wrapper/maven-wrapper.properties
+# Maven wrapper: mvnw + .mvn/wrapper/maven-wrapper.properties (holds distributionUrl) MUST be committed,
+# otherwise ./mvnw does not work in a fresh clone or in CI.
 
 # IntelliJ IDEA
 .idea/

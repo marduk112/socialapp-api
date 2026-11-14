@@ -3,11 +3,18 @@ package com.socialapp.usermanagement.infrastructure.web;
 import com.socialapp.usermanagement.application.command.CreateUserCommand;
 import com.socialapp.usermanagement.application.command.UpdateUserCommand;
 import com.socialapp.usermanagement.application.usecase.UserService;
+import com.socialapp.shared.domain.ForbiddenOperationException;
+import com.socialapp.shared.security.AuthenticatedUser;
 import com.socialapp.usermanagement.domain.User;
+import com.socialapp.usermanagement.infrastructure.security.JwtService;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Email;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.UUID;
@@ -18,27 +25,36 @@ import java.util.UUID;
 public class UserController {
 
     private final UserService userService;
+    private final JwtService jwtService;
 
     @PostMapping
-    public ResponseEntity<UserResponse> createUser(@Valid @RequestBody CreateUserRequest request) {
+    public ResponseEntity<AuthResponse> createUser(@Valid @RequestBody CreateUserRequest request) {
         var command = new CreateUserCommand(request.username(), request.email(), request.password(), request.avatarUrl());
         var user = userService.handle(command);
-        return ResponseEntity.status(HttpStatus.CREATED).body(UserResponse.from(user));
+        return ResponseEntity.status(HttpStatus.CREATED).body(withToken(user));
     }
 
     @PostMapping("/login")
-    public ResponseEntity<UserResponse> login(@RequestBody LoginRequest request) {
+    public ResponseEntity<AuthResponse> login(@RequestBody LoginRequest request) {
         var user = userService.login(request.identifier(), request.password());
-        return ResponseEntity.ok(UserResponse.from(user));
+        return ResponseEntity.ok(withToken(user));
     }
 
+    /**
+     * Only the account owner may update the profile. The response carries a fresh token
+     * because the username (a token claim) may have changed.
+     */
     @PutMapping("/{id}")
-    public ResponseEntity<UserResponse> updateUser(
+    public ResponseEntity<AuthResponse> updateUser(
             @PathVariable UUID id,
+            @AuthenticationPrincipal AuthenticatedUser me,
             @Valid @RequestBody UpdateUserRequest request) {
+        if (!me.id().equals(id)) {
+            throw new ForbiddenOperationException("You can only update your own profile");
+        }
         var command = new UpdateUserCommand(id, request.username(), request.bio(), request.avatarUrl());
         var user = userService.handle(command);
-        return ResponseEntity.ok(UserResponse.from(user));
+        return ResponseEntity.ok(withToken(user));
     }
 
     @GetMapping("/{id}")
@@ -54,13 +70,33 @@ public class UserController {
     }
 
     // ── Inner records (DTOs stay close to controller) ──────────────────────
-    record CreateUserRequest(String username, String email, String password, String avatarUrl) {}
-    record UpdateUserRequest(String username, String bio, String avatarUrl) {}
+    record CreateUserRequest(
+            @NotBlank @Size(min = 3, max = 30) String username,
+            @NotBlank @Email @Size(max = 255) String email,
+            @NotBlank @Size(min = 8, max = 72) String password,
+            String avatarUrl) {}
+
+    /** Username is required (the profile always carries one); bio is optional but capped. */
+    record UpdateUserRequest(
+            @NotBlank @Size(min = 3, max = 30) String username,
+            @Size(max = 500) String bio,
+            String avatarUrl) {}
     record LoginRequest(String identifier, String password) {}
+
+    private AuthResponse withToken(User user) {
+        return AuthResponse.from(user, jwtService.issueToken(user.getId(), user.getUsername()));
+    }
 
     record UserResponse(UUID id, String username, String email, String bio, String avatarUrl) {
         static UserResponse from(User u) {
             return new UserResponse(u.getId(), u.getUsername(), u.getEmail(), u.getBio(), u.getAvatarUrl());
+        }
+    }
+
+    /** UserResponse fields plus the JWT access token (flat, so existing clients keep working). */
+    record AuthResponse(UUID id, String username, String email, String bio, String avatarUrl, String token) {
+        static AuthResponse from(User u, String token) {
+            return new AuthResponse(u.getId(), u.getUsername(), u.getEmail(), u.getBio(), u.getAvatarUrl(), token);
         }
     }
 }

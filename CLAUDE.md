@@ -6,36 +6,137 @@ Spring Boot 3.4, Java 21, Maven. Hexagonal architecture with 3 Bounded Contexts.
 
 ```
 com.socialapp
-├── config/                        # KafkaConfig, KafkaEventPublisher, Neo4jTransactionConfig, WebConfig
+├── config/                        # KafkaConfig, Neo4jTransactionConfig, WebConfig, ValidationConfig, security/
+│   ├── outbox/                    # transactional outbox: OutboxEventWriter, OutboxRelay, OutboxCleanup,
+│   │                              # OutboxImporter (idempotent import of events recorded in another store)
+│   └── backfill/                  # StartupBackfill (contract), StartupBackfillRunner, BackfillStateRepository (V19)
 ├── shared/
 │   ├── domain/AggregateRoot.java  # extends Spring AbstractAggregateRoot
 │   └── events/                    # DomainEvent (sealed), UserCreatedEvent, UserUpdatedEvent,
-│                                  # PostCreatedEvent, ReactionEvent
+│                                  # PostCreatedEvent, ReactionEvent, UserFollowedEvent, UserUnfollowedEvent
 ├── usermanagement/
 │   ├── domain/       User, UserId, UserRepository
 │   ├── application/  UserService, CreateUserCommand, UpdateUserCommand
 │   └── infrastructure/web/  UserController, UserPersistenceAdapter, UserJpaRepository
 ├── socialgraph/
 │   ├── domain/       UserNode, UserNodeRepository
-│   ├── application/  SocialGraphService, FollowUserCommand
-│   └── infrastructure/messaging/  UserEventConsumer, SocialGraphController
+│   ├── application/  SocialGraphService, FollowUserCommand, FollowGraphChanged (in-process signal)
+│   └── infrastructure/
+│       ├── messaging/  UserEventConsumer          web/  SocialGraphController
+│       ├── outbox/     SocialOutboxStore, SocialOutboxForwarder (Neo4j outbox -> Postgres outbox)
+│       └── backfill/   FollowProjectionBackfill, FollowBackfillStore (pre-2A follows -> social-events)
 └── feed/
-    ├── domain/       Post, Comment, PostReaction, PostRepository, CommentRepository, PostReactionRepository
-    ├── application/  PostService
+    ├── domain/       Post, PostType, Comment, PostReaction, Follow (+ repositories), HashtagParser, MentionParser,
+    │                 Mention, PostHashtagRepository / PostMentionRepository (ports)
+    ├── application/  usecase/  PostService, PostView, AuthorProfileProjection, FollowProjection,
+    │                           MentionLookup, PostTextIndexBackfill (pre-2B hashtags/mentions)
+    │                 timeline/ TimelineService, FeedCursor, FeedScope, FeedPage, FolloweeLookup
     └── infrastructure/
-        ├── web/      PostController
+        ├── web/      PostController, PostResponse (REST + SSE `original` shape), MaxCodePoints
+        ├── persistence/ JdbcPostHashtagRepository, JdbcPostMentionRepository (JDBC, same JPA tx)
         ├── sse/      FeedSseService
-        └── messaging/ PostEventConsumer
+        └── messaging/ PostEventConsumer, UserEventConsumer, SocialEventConsumer
 ```
 
-## Domain Events — how they work
+## Domain events / Outbox
 
-1. `Post.create()` / `User.register()` calls `registerEvent(new XxxEvent(...))`
-2. Spring fires `ApplicationEvent` after `@Transactional` method commits
-3. `KafkaEventPublisher` catches via `@TransactionalEventListener(phase = AFTER_COMMIT)` and sends to Kafka
-4. Consumers in other BCs process asynchronously
+Every event that UserManagement and Feed publish (topics `user-events`, `post-events`, `reaction-events`)
+goes through a **transactional outbox** (`config/outbox`, BC-neutral). SocialGraph's events (`social-events`)
+reach the same outbox through a Neo4j-side outbox, see "SocialGraph events" below.
 
-**Never publish to Kafka directly from domain or application layer.** Always go through `registerEvent()`.
+1. The aggregate calls `registerEvent(new XxxEvent(...))`; Spring Data publishes it on `repository.save()`.
+2. `OutboxEventWriter` (`@TransactionalEventListener(BEFORE_COMMIT)`) inserts it into `outbox_events`
+   (V14) **in the same JPA transaction** - commit = aggregate + event durable, rollback = neither.
+   It flushes JPA first, so the aggregate's row lock is taken before the outbox id is drawn.
+3. `OutboxRelay` (`@Scheduled`, `app.outbox.poll-interval-ms`, plus an immediate wake-up after each commit)
+   takes `pg_try_advisory_xact_lock` (one publishing instance at a time), reads unpublished rows **in id
+   order**, sends each synchronously via the regular `KafkaTemplate<String, DomainEvent>` (same topic, key
+   and JSON as before) and sets `published_at`. The first failure stops the batch (nothing overtakes it),
+   `attempts`/`last_error` are recorded, retried next poll. At-least-once: a crash mid-batch re-sends.
+4. `OutboxCleanup` deletes published rows older than `app.outbox.retention-days`.
+
+Failures: broker/infrastructure errors block the relay (order kept, ERROR every `max-attempts` failures),
+never park. Row-specific errors (unreadable payload, serialization, record too large) park the row after
+`max-attempts` (`parked_at`, ERROR); a parked row holds back only later rows with the **same topic+key**.
+Repair: fix the row and set `parked_at = NULL` (retried), or set `published_at` to skip it deliberately.
+SKIP LOCKED multi-publisher was rejected because it breaks per-key order.
+
+Config (`app.outbox.*`): `poll-interval-ms` (300), `batch-size` (100), `max-attempts` (10),
+`send-timeout-ms` (5000, also producer `max.block.ms`/`request.timeout.ms`/`delivery.timeout.ms`),
+`retention-days` (7), `cleanup-interval-ms` (3600000), `cleanup-batch-size` (10000).
+Shutdown: relay and cleanup stop on `ContextClosedEvent`; the relay interrupts a run in progress, so a
+blocked send/connection never delays shutdown (unstamped rows are re-published later).
+
+**Never publish to Kafka directly from domain or application layer.** Always go through `registerEvent()`,
+inside a JPA `@Transactional` method (or, for Neo4j state, the Neo4j outbox below). Adding an event type: add
+it to the sealed `DomainEvent`, the (exhaustive) switch in `OutboxEventWriter.routeOf`, and the exhaustive
+switches of every consumer (`UserEventConsumer` x2, `SocialEventConsumer`).
+
+### SocialGraph events (Neo4j state, Postgres outbox)
+
+`UserFollowedEvent` / `UserUnfollowedEvent` (eventId, occurredAt, followerId, followeeId) -> topic
+`social-events`, key = followerId. There is no transaction spanning Neo4j and Postgres, so:
+
+1. `UserNodeRepository.follow/unfollow` (one Cypher statement, one Neo4j tx) write-locks the follower node,
+   creates/deletes the FOLLOWS relationship **only if that changes the graph**, and in the same statement
+   creates a `:SocialOutbox` node (eventId, type, followerId, followeeId, occurredAt). A no-op follow/unfollow
+   matches nothing, records nothing and returns empty (`SocialGraphService` returns false).
+   `occurredAt` = per-follower logical clock `u.socialClock = max(now, previous + 1)` (epoch ms) advanced
+   under the lock: strictly increasing in graph commit order per follower.
+2. `SocialOutboxForwarder` (`@Scheduled` at `app.outbox.poll-interval-ms`, plus an AFTER_COMMIT wake-up via
+   the in-process `FollowGraphChanged` signal) reads pending nodes oldest first, calls
+   `OutboxImporter.importBatch` (one JPA tx, advisory lock, `INSERT ... ON CONFLICT (event_id) DO NOTHING`),
+   and deletes the nodes **only after** that commit. Then `OutboxRelay` publishes as usual.
+3. Guarantee: a committed graph change always yields exactly one outbox row (Kafka: at-least-once); a
+   rolled-back change yields none. A crash/outage between any two steps only delays the event (Neo4j node or
+   outbox row is retried; re-import is a no-op). Residual: lag while Postgres/Kafka are down; if a node is
+   re-imported after its published row was purged (> `retention-days`) it is published twice (harmless).
+   Malformed `:SocialOutbox` nodes (only by manual edits) are logged at ERROR and left in Neo4j for repair.
+4. Consumers must be idempotent and order-tolerant: keep the event with the newest `occurredAt` per
+   (follower, followee) (Kafka order is best effort; correctness relies on `occurredAt`).
+
+Follows that existed before stage 2A are backfilled automatically by `FollowProjectionBackfill` (see "Startup
+backfills"): per follower, one Neo4j tx takes the same follower lock and per-follower clock and records one
+`UserFollowedEvent` `:SocialOutbox` node per current FOLLOWS relationship; the forwarder does the rest. (A full
+reconciliation would also emit `UserUnfollowedEvent` for pairs active in Feed's `follows` but absent from the
+graph; not needed, the graph never lost relationships.)
+
+## Startup backfills (`config/backfill`)
+
+`StartupBackfillRunner` runs every `StartupBackfill` bean once per start, **asynchronously** after
+`ApplicationReadyEvent` (all beans incl. `Neo4jSchemaInitializer` initialised; startup is never delayed), each on its own
+daemon thread. A failing run (DB down) is retried every `app.backfill.retry-delay-ms` (30 s), resuming its progress. On
+`ContextClosedEvent` the runner asks them to stop and waits up to 5 s (batches are milliseconds). `app.backfill.enabled:
+false` disables the automatic run. Contract: durable completion marker (a completed backfill costs one lookup per
+start), keyset progress persisted with each batch (resumable), safe on several instances and with live traffic.
+Log: `Backfill <name> completed: N item(s), M record(s) written in X ms` (INFO); a completed one logs nothing above DEBUG.
+
+| Backfill | Marker | Re-run (then restart) |
+|---|---|---|
+| `follows-projection-stage2a` (`FollowProjectionBackfill`) | Neo4j node `(:Backfill {name})` (unique constraint `backfill_name_unique`): `completed`, `cursor` (last follower userId), `followers`, `events` | `MATCH (m:Backfill {name: 'follows-projection-stage2a'}) DETACH DELETE m` |
+| `post-text-index-v17` (`PostTextIndexBackfill`) | Postgres `backfill_state` row (V19): `completed_at`, `cursor_value` (last post id), `processed` | `UPDATE backfill_state SET completed_at = NULL, cursor_value = NULL WHERE name = 'post-text-index-v17'` (or DELETE the row) |
+
+**Follows** (`follows-projection-stage2a`): keyset over follower `userId` (500 per read), one Neo4j tx per follower
+(`FollowBackfillStore.emitCurrentFollows`): lock the marker (serialises instances; skip if complete or the cursor already
+passed this follower), advance the cursor, lock the follower node exactly like `follow/unfollow`, read its current FOLLOWS
+and take k ticks of `socialClock` (`base = max(now, clock + 1)`, events `base..base+k-1`). **Why no unfollow is ever
+resurrected:** the event "active at tick t" is taken under the follower lock from the same clock as every live change of
+that follower; an unfollow committed earlier removed the relationship (nothing emitted), one committed later gets a tick
+> t and wins in `FollowProjection` whatever the Kafka order. Live follows in between are emitted by the live path. Lock
+order is always marker -> follower (live: follower -> followee, never the marker): no deadlock. Re-running only
+re-emits "active" for current relationships at newer ticks (harmless). A database without the FOLLOWS type completes
+immediately.
+
+**Hashtags/mentions** (`post-text-index-v17`): Java, not Flyway (`\p{L}`): keyset over `posts.id` of candidates (not
+REPOST, no `post_hashtags`/`post_mentions` rows yet), 500 per tx. Each tx takes `pg_try_advisory_xact_lock(<"Soci">,
+hashtext(name))` (other instance: waits 200 ms and continues from the shared cursor), locks the batch `FOR UPDATE SKIP
+LOCKED` (never waits while holding locks: no deadlock with edits/deletes), re-checks "no rows" under the lock (an edit
+that committed first wins), writes exactly what create/edit writes (`Post.hashtags()` via `PostHashtagRepository.replace`
+incl. the `created_at` copy; mentions via `MentionLookup` + `MentionParser.resolve`, only against `author_profiles`, one
+profile query per batch), and stores the cursor in the same tx. Rows skipped because someone held their lock are retried
+one by one right after (single-row wait); the cursor stops before the first of them, so a crash loses nothing. Posts
+without tags are passed once (the cursor), never rescanned. Note: a post created after 2B whose text has only unresolved
+`@names` also has no rows, so it is re-resolved once (it may gain a mention of a user registered since).
 
 ## Kafka configuration rules
 
@@ -45,8 +146,16 @@ com.socialapp
   props.put(ErrorHandlingDeserializer.VALUE_DESERIALIZER_CLASS, JsonDeserializer.class);
   ```
 - Trusted packages: `com.socialapp.*`
+- Every `@KafkaListener` names its `containerFactory` (from `KafkaConfig`) and `groupId`. `spring.kafka.consumer.*` in
+  application.yml only configures Spring Boot's unused default factory; it is kept safe anyway (ErrorHandlingDeserializer
+  -> JsonDeserializer, `DomainEvent` default type, no group id) and the default container factory gets the DLT error
+  handler. `SocialAppIntegrationTest` asserts both.
 - Producer: `ACKS_CONFIG = all`, `ENABLE_IDEMPOTENCE_CONFIG = true`
-- Topics: `user-events`, `post-events`, `reaction-events` (3 partitions, replication factor 1)
+- Topics: `user-events`, `post-events`, `reaction-events`, `social-events` (3 partitions, replication
+  factor 1), each with a `<topic>.DLT` (DefaultErrorHandler: 3 attempts, then dead-letter)
+- Consumer groups (one listener per BC per topic, switch on the sealed `DomainEvent`):
+  `social-graph-group` (user-events), `feed-avatar-group` (user-events), `feed-sse-group` (post-events),
+  `feed-follows-group` (social-events -> `follows`)
 
 ## Transaction manager rules
 
@@ -74,25 +183,194 @@ Current migrations:
 - `V3__comments_sharing_editpost.sql` — comments table, sharing columns, updated_at
 - `V4__add_password_hash.sql` — password_hash column on users
 - `V5__add_original_content.sql` — original_content column on posts
+- `V6`–`V9` — author avatar on posts (later dropped), `author_profiles`, comment reactions and replies
+- `V10__author_profile_username.sql` — username + last_event_at in `author_profiles` (feed projection)
+- `V11__drop_cross_bc_user_fks.sql` — removes FKs from feed tables to `users` (BC isolation)
+- `V13__normalize_user_emails.sql` — lower-cases emails (V12 intentionally unused: do NOT add it, Flyway would reject it)
+- `V14__outbox_events.sql` — transactional outbox table (see "Domain events / Outbox")
+- `V15__feed_follows_projection.sql` — Feed's `follows` projection (tombstones, `last_event_at`, no FKs)
+- `V16__posts_keyset_indexes.sql` — `posts (created_at DESC, id DESC)` and `(author_id, created_at DESC, id DESC)`
+  for keyset pagination (replaces `idx_posts_author`)
+- `V17__post_hashtags_and_mentions.sql` — `post_hashtags`, `post_mentions` (FK to posts ON DELETE CASCADE) and
+  `author_profiles (lower(username))` index (see "Post text: limit, hashtags, mentions")
+- `V18__post_types_repost_quote.sql` — `posts.type` (POST|REPOST|QUOTE, NOT NULL DEFAULT 'POST'), backfill of legacy
+  shares, CHECKs `chk_posts_type` / `chk_posts_type_original`, partial unique index `ux_posts_repost_author_original`,
+  `ix_posts_original_type` (replaces `idx_posts_original`) (see "Reposts and quotes")
+- `V19__backfill_state.sql` — `backfill_state (name PK, cursor_value, processed, started_at, updated_at, completed_at)`:
+  markers/progress of Java startup backfills (see "Startup backfills")
 
 **Always create a new numbered migration file. Never modify existing ones.**
+
+## API error text language
+
+API error messages (incl. Bean Validation, e.g. `Validation failed: content must not be blank`) are deterministic
+**English**, whatever the client's `Accept-Language` or the JVM/OS locale (`-Duser.language=pl` would otherwise give
+Hibernate Validator's Polish "nie może być odstępem"). Two layers: `spring.web.locale: en` + `spring.web.locale-resolver:
+fixed` (request locale), and `config/ValidationConfig` (replaces Boot's `defaultValidator`; interpolates in
+`Locale.ENGLISH` regardless of the requested locale, so validation outside a request is English too). Do not localise
+API messages; tests: `ValidationConfigTest`, `PostControllerSecurityTest`, `SocialAppIntegrationTest` (Accept-Language pl
+on a pl JVM default).
 
 ## Password hashing
 
 Uses BCrypt (`BCryptPasswordEncoder`). Do NOT change to SHA-512 — BCrypt is intentionally slow and salted. SHA-512 is inappropriate for passwords.
 
+## Feed timeline (REST)
+
+`GET /api/v1/feed?scope=all|following&cursor=<opaque>&size=20` -> `{"items": [PostResponse...], "nextCursor": "<opaque>" | null}`
+(frontend contract; the old `page` param is gone and ignored).
+- `scope`: `all` (default, every post) | `following` (posts of users the caller follows per Feed's `follows`
+  projection, plus the caller's own); other values -> 400.
+- Keyset pagination over `(created_at DESC, id DESC)` (`TimelineService`, native row-value queries in
+  `PostRepository`); fetches size+1 to detect the last page (`nextCursor: null`). New/deleted posts between
+  requests never duplicate or skip the remaining posts.
+- `cursor`: unpadded base64url of `v1|<ISO instant>|<uuid>` (`FeedCursor`); malformed -> 400 JSON.
+- `size`: default 20, values > 100 clamped to 100, < 1 or non-numeric -> 400 JSON.
+
+`follows` projection (`FollowProjection`): one atomic upsert per event that applies only if `occurredAt` is newer
+than `last_event_at`; unfollow leaves a tombstone (`active = false`), so late/redelivered/out-of-order events
+never resurrect or delete wrongly.
+
+## Post text: limit, hashtags, mentions
+
+**Limit:** a post's own text (`content`; for a QUOTE, its required `comment`) is at most `Post.MAX_CONTENT_LENGTH`
+= **500 Unicode code points** (emoji = 1; whitespace/newlines count; no trimming; grapheme clusters such as ZWJ
+emoji count per code point). Enforced in the aggregate (`Post.create/quote/edit` -> `IllegalArgumentException`
+-> 400) and on the request records with `@MaxCodePoints(Post.MAX_CONTENT_LENGTH)` (NOT `@Size`: it counts UTF-16
+units and would reject 300 emoji). Blank content and blank quote comments are rejected (a REPOST has no text). Posts stored
+before the limit stay readable; editing one requires shortening it. Comments keep their own 2000 limit.
+
+**Hashtags** (`HashtagParser`, mirrored 1:1 by the frontend - change both or neither):
+- `#` + maximal run of `[\p{L}\p{N}_]` of 1..50 code points (a longer run is no tag at all, not a prefix);
+- the `#` is at text start or preceded by a char NOT in `[\p{L}\p{N}_&/]` (`a#b`, `&#123;`, `http://x/#anchor`
+  and the second tag of `#a#b` are not tags);
+- at least one letter (`#123` is not a tag);
+- normalised: `toLowerCase(Locale.ROOT)`, no `#`, de-duplicated, order of first appearance, max 30 per post.
+- Implemented as a code-point scanner: Java regex lookbehind misses a supplementary-plane letter before `#`.
+  Known limitation of the rule: combining marks (`\p{M}`, NFD accents, many Indic vowel signs) end a tag.
+
+**Mentions** (`MentionParser`): `@` + maximal run of `[\p{L}\p{N}_.-]`, trailing `.`/`-` trimmed, 3..30 code points;
+the `@` at text start or preceded by a char NOT in `[\p{L}\p{N}_.@-]` (e-mails never match). Resolved ONLY against
+Feed's `author_profiles` (one batched `lower(username) IN (...)` query per save, re-checked in Java with
+`Locale.ROOT`): case-insensitive; an exact-case match wins if usernames differ only in case, otherwise ambiguous ->
+skipped; unknown -> plain text; self-mention not stored; max 30 resolved per post.
+
+**Persistence:** `PostService.saveWithTextIndex` saves + flushes the post, then replaces its rows in `post_hashtags
+(post_id, tag, position, created_at)` and `post_mentions (post_id, mentioned_user_id, username, position)` in the
+same transaction (create, edit, quote, repost; edit locks the post row). `post_hashtags.created_at` is copied from the
+post row by the INSERT, so the tag timeline pages on index `(tag, created_at DESC, post_id DESC)`.
+`post_mentions.username` is the canonical name at save time and is NOT refreshed on rename (so `@name` in the text
+keeps matching; `mentioned_user_id` is authoritative). Posts created before V17 get their rows from the one-time
+`post-text-index-v17` startup backfill (see "Startup backfills"), with the same parsers and resolution.
+
+**Reads:** every `PostResponse` (feed pages, tag pages, GET/create/edit/repost/quote/share/like responses) has
+`hashtags: string[]` and `mentions: [{userId, username}]` for the post's own text (never `originalContent`; a
+quote's comment only), batch-loaded by `PostService.views` (see "Reposts and quotes" for the full field list and
+query budget: no N+1).
+
+`GET /api/v1/hashtags/{tag}/posts?cursor=&size=20` -> `{"items": [PostResponse...], "nextCursor": ...}`: same
+keyset ordering, cursor codec and size rules as `/feed`. QUOTEs with the tag in their comment appear; REPOSTs never
+do (no text, and the query also filters `type <> 'REPOST'`). `{tag}` is case-insensitive, one leading `#` (`%23`)
+tolerated; invalid tag -> 400 JSON; unknown tag -> 200 with empty items.
+
+## Reposts and quotes (stage 2C)
+
+`posts.type` (`PostType`): **POST** (own text) | **REPOST** (`content = ""`, no hashtags/mentions, no own image) |
+**QUOTE** (required comment, 1..500 code points, hashtags/mentions indexed like a post). A REPOST/QUOTE points at its
+original via `original_post_id`; the type is immutable. Invariants live in `Post.repost/quote/edit` and are mirrored
+by V18 CHECKs (POST has no original; REPOST has one and `content = ''`).
+
+- **Targets / flattening:** reposting or quoting a REPOST item targets that repost's original
+  (`Post.repostTargetId()`); a QUOTE or a POST is targeted itself. A repost never points at a repost (the factories
+  reject it). Unknown/deleted target -> 404. Own posts may be reposted/quoted.
+- **Idempotent repost:** at most one REPOST per (author, original): partial unique index
+  `ux_posts_repost_author_original (author_id, original_post_id) WHERE type = 'REPOST'`. `PostService.repost` reads
+  the item without a lock, then **locks the original's row** (`findByIdForUpdate`, same approach as reactions), so a
+  concurrent double submit is serialised and the second call finds the first one's row (200, not 500). QUOTEs are
+  unlimited (they lock the original too, so they cannot race its deletion).
+- **Undo:** `PostService.undoRepost` resolves a repost item id to its original, locks the original, deletes the
+  caller's REPOST; no repost / unknown id -> no-op (204).
+- **Edit:** a REPOST cannot be edited (`ConflictException` -> 409; ownership is checked first -> 403 for others). A
+  QUOTE's comment is edited through `PUT /posts/{id}` (500 limit, re-indexes hashtags/mentions).
+- **Deleting an original** (`PostService.deletePost`, row locked first): its REPOSTs are deleted (bulk delete; their
+  comments/reactions/index rows cascade by FK), its QUOTEs get `original_content` / `original_author_username`
+  cleared, then the V3 FK (`ON DELETE SET NULL`) nulls their `original_post_id`: they stay, with `original = null`
+  ("unavailable"). The CHECK forbids a REPOST without original, so a raw `DELETE` of an original that still has
+  reposts fails instead of orphaning them - delete its reposts first (or go through the service).
+- **Lock order** (deadlock-free): original -> its reposts/quotes. Never lock a repost/quote row and then its
+  original (that is why `lockTarget` reads the item without a lock).
+- **Events:** reposts/quotes are published like posts (`PostCreatedEvent` via the outbox, so they appear live in For
+  you, and in Following when the reposter is followed). `PostCreatedEvent` gained `postType` ("POST"|"REPOST"|
+  "QUOTE") and `originalPostId`; the first seven fields are unchanged and events without the new fields
+  deserialize as a plain post.
+
+**Read model** (`PostService.views(posts, viewerId)` -> `PostView` -> `PostResponse`), on every endpoint returning
+posts: `type`, `repostsCount` / `quotesCount` (REPOST / QUOTE rows pointing at the post: ONE grouped query on
+`ix_posts_original_type`, not denormalised columns), `viewerReposted` (caller has a REPOST of it: one IN query on the
+partial unique index), `userReaction` (caller's LIKE/DISLIKE or null: one IN query), `originalAuthorId`, and
+`original: PostResponse | null` - the full original (own avatar, hashtags, mentions, counters, caller's state) for a
+REPOST/QUOTE, null for a POST or when the original is gone. One level only (the nested one has `original = null`),
+**except a REPOST of a QUOTE**: its nested quote carries the quoted post (second level, `original = null` there; null
+if the quoted post is gone). Flat legacy fields `originalPostId`, `originalAuthorUsername`, `originalContent` are
+kept (snapshot at creation). For a REPOST item, top-level `content` is "" and its counters/reactions are those of the
+repost row itself (clients act on `original`). Query budget per page, independent of its size: <= 2 for the originals
+(level 1, then level 2) + avatars + hashtags + mentions + counts + (with a viewer) reposted flags + reactions = <= 8.
+Timelines (`all`, `following`) contain REPOST and QUOTE items ordered by their own `created_at` like any post.
+
+Endpoints:
+- `POST /api/v1/posts/{id}/repost` (no body) -> 201 PostResponse (type REPOST) | 200 if the caller already reposted it.
+- `DELETE /api/v1/posts/{id}/repost` -> 204 always ({id} = original id or a repost item id).
+- `POST /api/v1/posts/{id}/quote` `{ "comment": string }` -> 201 PostResponse (type QUOTE); blank/missing/> 500 -> 400.
+- `POST /api/v1/posts/{id}/share` `{ "comment"?: string }` - **DEPRECATED alias** (kept so older clients work): blank or
+  missing comment -> repost semantics (201/200), otherwise quote (201). Use `/repost` or `/quote`.
+
+**V18 backfill** of legacy shares (rows with any `original_*` column set): blank content -> REPOST (content ''),
+otherwise QUOTE; shares of a share are flattened to the end of the chain (snapshot refreshed); shares whose original
+is gone: REPOSTs deleted, QUOTEs kept with original/snapshot NULL; several REPOSTs by one author of the same original:
+the oldest `(created_at, id)` is kept, the others deleted (with their comments/reactions); `image_url` of REPOSTs and
+QUOTEs cleared (a share only ever copied the original's image). Tested in `V18BackfillMigrationTest`.
+
 ## SSE (Server-Sent Events)
 
-`FeedSseService` manages `CopyOnWriteArrayList<SseEmitter>`. On `broadcast()`:
-- Iterates all emitters
-- Sends event with `EventBuilder.event("new-post")`
+`GET /api/v1/feed/stream?access_token=...&scope=all|following` (default `all`).
+`FeedSseService` keeps one subscription (emitter, viewer, scope) per stream. On `broadcast()`:
+- `scope=following` subscriptions only get posts whose author is the viewer or followed by the viewer,
+  checked per post via `FolloweeLookup` (viewer's followee set cached for `app.feed.followees-cache-ttl`,
+  default 5s, invalidated when this instance applies a follow event) - follows made while connected apply
+  without reconnecting
+- Iterates all admitted emitters
+- Sends event with `EventBuilder.event("new-post")`; payload `PostSsePayload` includes `hashtags` and `mentions`
+  (same shapes as `PostResponse`, read from Feed's tables by `PostEventConsumer`, never null), and since 2C `type`,
+  `originalAuthorId` and `original` (a `PostResponse` built by `PostService.views` without a viewer: same nesting
+  rules as REST, `viewerReposted = false`, `userReaction = null`). Pre-2C field names are unchanged (`postId`).
+  The following-scope filter uses the payload's `authorId` (the reposter/quoter).
 - Removes dead emitters on `SseEmitter.SseEventBuilderException`
 
 Heartbeat emitter is sent on subscribe with event name `"connected"`. Do NOT change event names — frontend listens for exactly `"connected"` and `"new-post"`.
 
 ## Authentication
 
-Currently session-less (no JWT/Spring Security). Login returns the full `User` object. Frontend stores it in localStorage via `CurrentUserService`. When adding security, keep backward compatibility with existing frontend service structure.
+Stateless JWT (Spring Security + jjwt, HS256). `config/security/SecurityConfig` holds the filter chain and CORS;
+`usermanagement/infrastructure/security/JwtService` issues/verifies tokens (`sub` = user UUID, `username` claim).
+Config: `app.jwt.secret` (env `APP_JWT_SECRET`, >= 32 bytes) and `app.jwt.expiration-minutes`.
+
+- Public: `POST /api/v1/users`, `POST /api/v1/users/login` (both return user fields + `token`), `GET /uploads/**`, CORS preflight.
+- Everything else needs `Authorization: Bearer <token>`; SSE `GET /api/v1/feed/stream` also accepts `?access_token=`.
+- Never take the acting user from request params/bodies. Controllers read it via
+  `@AuthenticationPrincipal AuthenticatedUser me` (`shared/security`, no cross-BC import).
+- Ownership checks live in the aggregates (`Post/Comment.ensureAuthoredBy`) and throw
+  `shared.domain.ForbiddenOperationException` -> 403. `SecurityException` -> 401 is only for bad login credentials.
+
+## Tests
+
+- `SocialAppIntegrationTest` (Testcontainers: Postgres, Neo4j, Kafka): `@Testcontainers` is declared BEFORE
+  `@SpringBootTest` and the class has `@DirtiesContext(AFTER_CLASS)`, so the context (relay, forwarder, listeners) is
+  closed before the containers stop (JUnit runs after-all callbacks in reverse registration order). Keep that order, or
+  the log ends with connection errors such as "Outbox relay run failed". It binds the server to 127.0.0.1 so Tomcat's
+  graceful shutdown does not hit a blocked acceptor on sandboxed machines.
+- Kafka error handling is tested end to end for both a malformed record (DeserializationException -> DLT at once) and a
+  record that deserializes but keeps failing in the listener (3 attempts, then `<topic>.DLT` with `kafka_dlt-*` headers;
+  later records of the same partition still processed).
 
 ## Build
 

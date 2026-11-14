@@ -2,9 +2,12 @@ package com.socialapp;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.autoconfigure.security.servlet.UserDetailsServiceAutoConfiguration;
 import org.springframework.scheduling.annotation.EnableAsync;
 
-@SpringBootApplication
+// UserDetailsServiceAutoConfiguration is excluded: authentication is JWT-only, so the
+// default in-memory user with a generated password must not exist.
+@SpringBootApplication(exclude = UserDetailsServiceAutoConfiguration.class)
 @EnableAsync
 public class SocialAppApplication {
 
