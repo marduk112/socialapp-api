@@ -1,6 +1,7 @@
 # Backend — LLM Instructions
 
-Spring Boot 3.4, Java 21, Maven. Hexagonal architecture with 3 Bounded Contexts.
+Spring Boot 3.4, Java 21, Maven. Hexagonal architecture with 4 Bounded Contexts (UserManagement, SocialGraph, Feed,
+Notification).
 
 ## Package structure
 
@@ -12,8 +13,9 @@ com.socialapp
 │   └── backfill/                  # StartupBackfill (contract), StartupBackfillRunner, BackfillStateRepository (V19)
 ├── shared/
 │   ├── domain/AggregateRoot.java  # extends Spring AbstractAggregateRoot
-│   └── events/                    # DomainEvent (sealed), UserCreatedEvent, UserUpdatedEvent,
-│                                  # PostCreatedEvent, ReactionEvent, UserFollowedEvent, UserUnfollowedEvent
+│   └── events/                    # DomainEvent (sealed), UserCreatedEvent, UserUpdatedEvent, PostCreatedEvent,
+│                                  # ReactionEvent, UserFollowedEvent, UserUnfollowedEvent, CommentCreatedEvent,
+│                                  # Snippet (<= 120 code point plain-text excerpt carried by events)
 ├── usermanagement/
 │   ├── domain/       User, UserId, UserRepository
 │   ├── application/  UserService, CreateUserCommand, UpdateUserCommand
@@ -36,11 +38,21 @@ com.socialapp
         ├── persistence/ JdbcPostHashtagRepository, JdbcPostMentionRepository (JDBC, same JPA tx)
         ├── sse/      FeedSseService
         └── messaging/ PostEventConsumer, UserEventConsumer, SocialEventConsumer
+└── notification/                  # stage 3A, see "Notifications"
+    ├── domain/       Notification (aggregate, dedupe/toggle rules), NotificationType, NotificationIntent,
+    │                 NotificationPolicy (pure: who is notified), ActorProfile (+ repositories)
+    ├── application/  NotificationService, ActorProfileProjection, NotificationCursor, NotificationPage,
+    │                 NotificationView, ports NotificationQueries / NotificationCutoff
+    └── infrastructure/
+        ├── web/         NotificationController, NotificationResponse (REST + SSE shape)
+        ├── sse/         NotificationSseService (per-user streams)
+        ├── persistence/ JdbcNotificationQueries (read side, LEFT JOIN profiles), JdbcNotificationCutoff
+        └── messaging/   NotificationEventConsumer (5 listeners, one per topic)
 ```
 
 ## Domain events / Outbox
 
-Every event that UserManagement and Feed publish (topics `user-events`, `post-events`, `reaction-events`)
+Every event that UserManagement and Feed publish (topics `user-events`, `post-events`, `reaction-events`, `comment-events`)
 goes through a **transactional outbox** (`config/outbox`, BC-neutral). SocialGraph's events (`social-events`)
 reach the same outbox through a Neo4j-side outbox, see "SocialGraph events" below.
 
@@ -69,8 +81,24 @@ blocked send/connection never delays shutdown (unstamped rows are re-published l
 
 **Never publish to Kafka directly from domain or application layer.** Always go through `registerEvent()`,
 inside a JPA `@Transactional` method (or, for Neo4j state, the Neo4j outbox below). Adding an event type: add
-it to the sealed `DomainEvent`, the (exhaustive) switch in `OutboxEventWriter.routeOf`, and the exhaustive
-switches of every consumer (`UserEventConsumer` x2, `SocialEventConsumer`).
+it to the sealed `DomainEvent` (+ `@JsonSubTypes`), the (exhaustive) switch in `OutboxEventWriter.routeOf`, and the
+exhaustive switches of every consumer (`UserEventConsumer` x2, `SocialEventConsumer`, `NotificationEventConsumer`).
+Wire formats are append-only: new fields go at the end, readers must accept their absence (null / empty).
+
+### Feed events for notifications (stage 3A)
+
+- `CommentCreatedEvent` (eventId, occurredAt, commentId, postId, postAuthorId, parentCommentId, parentCommentAuthorId,
+  authorId, authorUsername, contentSnippet) -> NEW topic `comment-events`, key = postId, aggregateType `Comment`.
+  Registered by `Comment.create(post, parent, ...)` (`Comment` is now an `AggregateRoot`), published on save. Replies
+  carry the parent and its author; `contentSnippet` = `Snippet.of(text)` at creation (not updated on edit).
+- `PostCreatedEvent` + `originalAuthorId`, `originalContent` (REPOST/QUOTE: author and text of the target; null for a
+  POST) and `mentionedUserIds` (resolved mentions of the post's own text, never the author; `[]` when none or for old
+  events). `PostService.saveWithTextIndex` resolves mentions BEFORE `save()` and calls `Post.announceMentions`, which
+  replaces the pending creation event (Spring Data publishes on `save()`). Edits do not announce new mentions.
+- `ReactionEvent` + `target` (`POST` default | `COMMENT`), `commentId`, `targetOwnerId` (author of the reacted
+  post/comment), `targetSnippet`. **Comment reactions are published since 3A** (`Comment.react(userId, ...)`) on
+  `reaction-events` with `postId` = the comment's post (same key), aggregateType `Comment`. Old events deserialize with
+  `target = POST` and nulls. Consumers that only want post reactions must check `target`.
 
 ### SocialGraph events (Neo4j state, Postgres outbox)
 
@@ -151,11 +179,14 @@ without tags are passed once (the cursor), never rescanned. Note: a post created
   -> JsonDeserializer, `DomainEvent` default type, no group id) and the default container factory gets the DLT error
   handler. `SocialAppIntegrationTest` asserts both.
 - Producer: `ACKS_CONFIG = all`, `ENABLE_IDEMPOTENCE_CONFIG = true`
-- Topics: `user-events`, `post-events`, `reaction-events`, `social-events` (3 partitions, replication
-  factor 1), each with a `<topic>.DLT` (DefaultErrorHandler: 3 attempts, then dead-letter)
+- Topics: `user-events`, `post-events`, `reaction-events`, `social-events`, `comment-events` (3 partitions,
+  replication factor 1), each with a `<topic>.DLT` (DefaultErrorHandler: 3 attempts, then dead-letter)
 - Consumer groups (one listener per BC per topic, switch on the sealed `DomainEvent`):
   `social-graph-group` (user-events), `feed-avatar-group` (user-events), `feed-sse-group` (post-events),
-  `feed-follows-group` (social-events -> `follows`)
+  `feed-follows-group` (social-events -> `follows`), and Notification's `notification-users-group` (user-events ->
+  actor profiles), `notification-social-group` (social-events), `notification-posts-group` (post-events),
+  `notification-reactions-group` (reaction-events), `notification-comments-group` (comment-events). New groups start
+  at the earliest offset (history is replayed; see "Notifications" for why that creates no historic notifications).
 
 ## Transaction manager rules
 
@@ -198,6 +229,9 @@ Current migrations:
   `ix_posts_original_type` (replaces `idx_posts_original`) (see "Reposts and quotes")
 - `V19__backfill_state.sql` — `backfill_state (name PK, cursor_value, processed, started_at, updated_at, completed_at)`:
   markers/progress of Java startup backfills (see "Startup backfills")
+- `V20__notifications.sql` — Notification BC: `notifications` (dedupe key `ux_notifications_key (recipient_id, type,
+  actor_id, target_id)`, tombstone `retracted`, `last_event_at`, CHECKs type / not-self, partial indexes for the page
+  and the unread count), `notification_actor_profiles`, `notification_cutoff` (one row: migration time). No FKs.
 
 **Always create a new numbered migration file. Never modify existing ones.**
 
@@ -347,6 +381,54 @@ QUOTEs cleared (a share only ever copied the original's image). Tested in `V18Ba
 - Removes dead emitters on `SseEmitter.SseEventBuilderException`
 
 Heartbeat emitter is sent on subscribe with event name `"connected"`. Do NOT change event names — frontend listens for exactly `"connected"` and `"new-post"`.
+The notification stream (`/api/v1/notifications/stream`, see "Notifications") uses `"connected"` and `"notification"`.
+
+## Notifications (stage 3A)
+
+Notification BC learns everything from Kafka only (no import of other BCs, no FKs); PostgreSQL (JPA writes, JDBC reads).
+
+**Types and rules** (`NotificationPolicy`, pure): FOLLOW (someone follows you), LIKE (your post or comment; dislikes
+never notify), COMMENT (on your post), REPLY (to your comment), MENTION (`@you` in a post or a quote's comment), REPOST,
+QUOTE (of your post). Never yourself. One action notifies a recipient at most once, precedence REPLY > COMMENT and
+QUOTE/REPOST > MENTION (a reply to your comment on your own post is only a REPLY; a quote that mentions the quoted
+author is only a QUOTE). A reply in your post's thread to SOMEONE ELSE's comment gives you a COMMENT.
+
+**Dedupe target** (`target_id`): FOLLOW = followee, LIKE = post or comment, COMMENT/REPLY = the new comment, MENTION =
+the mentioning post, REPOST = the ORIGINAL (undo + repost again never notifies twice), QUOTE = the quote post (each quote
+notifies). `postId` = the post to open (COMMENT/REPLY/LIKE-on-comment: the comment's post; REPOST: the original;
+QUOTE/MENTION: the new post; FOLLOW: null). Snippet (`Snippet.of`, <= 120 code points, whitespace collapsed): the comment
+(COMMENT/REPLY), the liked text (LIKE), the post text (MENTION), the quote's comment (QUOTE), the reposted text (REPOST),
+null for FOLLOW. Snapshots: stay when the target is edited/deleted (no event exists for those).
+
+**Idempotency / toggling** (`Notification.apply`, row locked by key; first insert `ON CONFLICT DO NOTHING`):
+newest `occurredAt` wins (`last_event_at`, micros), so redeliveries and out-of-order events are no-ops. A retraction
+(unlike, unfollow) hides the notification only while UNREAD (tombstone `retracted`); a READ one stays (the user saw it;
+the list does not change under them) and re-liking never notifies again. Re-liking after an unread retraction
+resurrects the SAME row (same id, new `createdAt`, unread) and pushes it again over SSE: toggling yields at most one
+unread notification. An unlike seen before its like leaves a tombstone, so the older like cannot resurrect it. Undo
+repost and comment/post deletion publish nothing, so they never retract.
+
+**No historic notifications:** V20 stores `notification_cutoff.since` = migration time; events with an older
+`occurredAt` are ignored (the new consumer groups replay the retained Kafka history from the earliest offset). No backfill
+of past follows/likes/comments. The actor profile projection (`notification_actor_profiles`, same rules as Feed's
+`AuthorProfileProjection`: create-if-absent, newest wins; events without userId dropped with a WARN, never DLT'd) DOES use
+the history, so existing users get names as long as their user events are still retained in Kafka (7 days by default).
+`actorUsername` is resolved at read time: profile username, else the name carried by the event (post/comment events),
+else `"unknown"`; it refreshes as soon as the profile arrives.
+
+**API** (all authenticated, always the caller's own notifications):
+- `GET /api/v1/notifications?cursor=&size=20` -> `{"items": [Notification...], "nextCursor": string|null}`, keyset
+  `(created_at DESC, id DESC)` (`NotificationCursor`, same opaque `v1|instant|uuid` format as the feed), size default 20,
+  clamp 100, < 1 / non-numeric / malformed cursor -> 400 JSON. One query per page (LEFT JOIN profiles).
+- Notification = `{id, type, actorId, actorUsername, actorAvatarUrl, postId, commentId, snippet, read, createdAt}`.
+- `GET /api/v1/notifications/unread-count` -> `{"count": n}` (partial index).
+- `POST /api/v1/notifications/read` `{"ids": [...]}` -> 204; missing body / missing or empty `ids` = mark ALL read;
+  ids of other users or unknown ids are silently ignored; idempotent; > 1000 ids or a non-uuid -> 400.
+- SSE `GET /api/v1/notifications/stream?access_token=<jwt>`: `connected` (data `ok`), then `notification` (data =
+  Notification JSON) for the caller only, to all of the caller's open streams. Pushed after the consumer's transaction
+  committed (`@Async`); a retraction is not pushed (clients see it on the next list refresh). Like the feed stream, live
+  delivery only reaches streams on the instance that consumed the event (single instance today). Streams are completed
+  on `ContextClosedEvent` (graceful shutdown stays ~3 s).
 
 ## Authentication
 
@@ -355,7 +437,9 @@ Stateless JWT (Spring Security + jjwt, HS256). `config/security/SecurityConfig` 
 Config: `app.jwt.secret` (env `APP_JWT_SECRET`, >= 32 bytes) and `app.jwt.expiration-minutes`.
 
 - Public: `POST /api/v1/users`, `POST /api/v1/users/login` (both return user fields + `token`), `GET /uploads/**`, CORS preflight.
-- Everything else needs `Authorization: Bearer <token>`; SSE `GET /api/v1/feed/stream` also accepts `?access_token=`.
+- Everything else needs `Authorization: Bearer <token>`; the SSE streams `GET /api/v1/feed/stream` and
+  `GET /api/v1/notifications/stream` (only these two paths, GET only) also accept `?access_token=`
+  (`JwtAuthenticationFilter`).
 - Never take the acting user from request params/bodies. Controllers read it via
   `@AuthenticationPrincipal AuthenticatedUser me` (`shared/security`, no cross-BC import).
 - Ownership checks live in the aggregates (`Post/Comment.ensureAuthoredBy`) and throw
@@ -368,6 +452,8 @@ Config: `app.jwt.secret` (env `APP_JWT_SECRET`, >= 32 bytes) and `app.jwt.expira
   closed before the containers stop (JUnit runs after-all callbacks in reverse registration order). Keep that order, or
   the log ends with connection errors such as "Outbox relay run failed". It binds the server to 127.0.0.1 so Tomcat's
   graceful shutdown does not hit a blocked acceptor on sandboxed machines.
+- `NotificationIntegrationTest` (same container/context lifecycle): follow/like/unlike/comment/reply/mention/repost/quote
+  over HTTP -> outbox -> Kafka -> Notification -> REST + SSE (isolation between users), and the enriched outbox rows.
 - Kafka error handling is tested end to end for both a malformed record (DeserializationException -> DLT at once) and a
   record that deserializes but keeps failing in the listener (3 attempts, then `<topic>.DLT` with `kafka_dlt-*` headers;
   later records of the same partition still processed).

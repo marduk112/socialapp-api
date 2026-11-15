@@ -1,10 +1,13 @@
 package com.socialapp.feed.domain;
 
+import com.socialapp.shared.domain.AggregateRoot;
 import com.socialapp.shared.domain.ForbiddenOperationException;
+import com.socialapp.shared.events.CommentCreatedEvent;
+import com.socialapp.shared.events.ReactionEvent;
+import com.socialapp.shared.events.Snippet;
 import jakarta.persistence.*;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
-import com.socialapp.shared.events.ReactionEvent;
 import org.hibernate.annotations.DynamicUpdate;
 
 import java.time.Instant;
@@ -15,13 +18,17 @@ import java.util.UUID;
  * Same concurrency model as {@link Post}: counters change only under a row lock
  * ({@link CommentRepository#findByIdForUpdate}); {@code @DynamicUpdate} keeps other writers
  * (edit, author rename) from overwriting them.
+ *
+ * <p>Events (published through the outbox on {@code save()}): {@link CommentCreatedEvent} on creation (with the
+ * post's author and, for a reply, the parent comment's author, so consumers need no lookup) and a
+ * {@link ReactionEvent} with {@code target = COMMENT} per actual like/dislike change.
  */
 @Entity
 @Table(name = "comments")
 @DynamicUpdate
 @Getter
 @NoArgsConstructor(access = lombok.AccessLevel.PROTECTED)
-public class Comment {
+public class Comment extends AggregateRoot<Comment> {
 
     @Id
     @Column(columnDefinition = "uuid")
@@ -54,11 +61,20 @@ public class Comment {
     @Column(name = "updated_at")
     private Instant updatedAt;
 
-    public static Comment create(UUID postId, UUID authorId, String authorUsername, String content, UUID parentCommentId) {
+    /**
+     * A comment on {@code post} by {@code authorId}; a reply when {@code parent} is given (it must belong to the same
+     * post). Registers a {@link CommentCreatedEvent}.
+     */
+    public static Comment create(Post post, Comment parent, UUID authorId, String authorUsername, String content) {
+        if (post == null) throw new IllegalArgumentException("Post is required");
+        if (parent != null && !parent.belongsTo(post.getId())) {
+            throw new IllegalArgumentException("Parent comment " + parent.getId()
+                    + " does not belong to post " + post.getId());
+        }
         var c = new Comment();
         c.id = UUID.randomUUID();
-        c.postId = postId;
-        c.parentCommentId = parentCommentId;
+        c.postId = post.getId();
+        c.parentCommentId = parent == null ? null : parent.getId();
         c.authorId = authorId;
         c.authorUsername = authorUsername;
         c.content = content;
@@ -66,6 +82,8 @@ public class Comment {
         c.dislikesCount = 0;
         c.createdAt = Instant.now();
         c.updatedAt = c.createdAt;
+        c.registerEvent(new CommentCreatedEvent(c.id, c.postId, post.getAuthorId(), c.parentCommentId,
+                parent == null ? null : parent.getAuthorId(), authorId, authorUsername, Snippet.of(content)));
         return c;
     }
 
@@ -93,9 +111,11 @@ public class Comment {
 
     /**
      * Applies a like/dislike toggle given the user's current reactions on this comment; returns the
-     * change the caller must persist. Idempotent. Must be called with the comment row locked.
+     * change the caller must persist and registers a {@link ReactionEvent} (target COMMENT) per actual change.
+     * Idempotent. Must be called with the comment row locked.
      */
-    public ReactionChange react(Set<ReactionEvent.ReactionType> current, ReactionEvent.ReactionType type, boolean add) {
+    public ReactionChange react(UUID userId, Set<ReactionEvent.ReactionType> current, ReactionEvent.ReactionType type,
+                                boolean add) {
         var change = ReactionChange.decide(current, type, add);
         for (var removed : change.removed()) {
             if (removed == ReactionEvent.ReactionType.LIKE) {
@@ -103,9 +123,15 @@ public class Comment {
             } else if (dislikesCount > 0) {
                 dislikesCount--;
             }
+            registerEvent(ReactionEvent.onComment(postId, id, authorId, Snippet.of(content), userId, removed,
+                    ReactionEvent.ReactionAction.REMOVED));
         }
-        if (change.added() == ReactionEvent.ReactionType.LIKE) likesCount++;
-        else if (change.added() == ReactionEvent.ReactionType.DISLIKE) dislikesCount++;
+        if (change.added() != null) {
+            if (change.added() == ReactionEvent.ReactionType.LIKE) likesCount++;
+            else dislikesCount++;
+            registerEvent(ReactionEvent.onComment(postId, id, authorId, Snippet.of(content), userId, change.added(),
+                    ReactionEvent.ReactionAction.ADDED));
+        }
         return change;
     }
 }

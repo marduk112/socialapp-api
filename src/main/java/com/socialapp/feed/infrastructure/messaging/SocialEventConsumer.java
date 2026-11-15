@@ -2,6 +2,7 @@ package com.socialapp.feed.infrastructure.messaging;
 
 import com.socialapp.feed.application.timeline.FolloweeLookup;
 import com.socialapp.feed.application.usecase.FollowProjection;
+import com.socialapp.shared.events.CommentCreatedEvent;
 import com.socialapp.shared.events.DomainEvent;
 import com.socialapp.shared.events.PostCreatedEvent;
 import com.socialapp.shared.events.ReactionEvent;
@@ -47,6 +48,7 @@ public class SocialEventConsumer {
             case UserUpdatedEvent e -> log.warn("Unexpected UserUpdatedEvent on social-events, ignoring: {}", e.eventId());
             case PostCreatedEvent e -> log.warn("Unexpected PostCreatedEvent on social-events, ignoring: {}", e.eventId());
             case ReactionEvent e -> log.warn("Unexpected ReactionEvent on social-events, ignoring: {}", e.eventId());
+            case CommentCreatedEvent e -> log.warn("Unexpected CommentCreatedEvent on social-events, ignoring: {}", e.eventId());
         }
     }
 }

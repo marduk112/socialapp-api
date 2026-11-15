@@ -13,10 +13,11 @@ import java.util.UUID;
         @JsonSubTypes.Type(value = PostCreatedEvent.class, name = "PostCreatedEvent"),
         @JsonSubTypes.Type(value = ReactionEvent.class,    name = "ReactionEvent"),
         @JsonSubTypes.Type(value = UserFollowedEvent.class,   name = "UserFollowedEvent"),
-        @JsonSubTypes.Type(value = UserUnfollowedEvent.class, name = "UserUnfollowedEvent")
+        @JsonSubTypes.Type(value = UserUnfollowedEvent.class, name = "UserUnfollowedEvent"),
+        @JsonSubTypes.Type(value = CommentCreatedEvent.class, name = "CommentCreatedEvent")
 })
 public sealed interface DomainEvent permits UserCreatedEvent, UserUpdatedEvent, PostCreatedEvent, ReactionEvent,
-        UserFollowedEvent, UserUnfollowedEvent {
+        UserFollowedEvent, UserUnfollowedEvent, CommentCreatedEvent {
     UUID eventId();
     Instant occurredAt();
     String eventType();

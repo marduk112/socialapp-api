@@ -42,7 +42,7 @@ class PostServiceTest {
     @Test
     void replyToCommentOfAnotherPostIsRejected() {
         var post = Post.create(ALICE, "alice", "p1", null);
-        var otherPostsComment = Comment.create(UUID.randomUUID(), ALICE, "alice", "c", null);
+        var otherPostsComment = Comment.create(Post.create(ALICE, "alice", "other", null), null, ALICE, "alice", "c");
         when(posts.findByIdForUpdate(post.getId())).thenReturn(Optional.of(post));
         when(comments.findByIdForUpdate(otherPostsComment.getId())).thenReturn(Optional.of(otherPostsComment));
 
@@ -66,7 +66,7 @@ class PostServiceTest {
     @Test
     void replyToCommentOfSamePostIsAcceptedAndDoesNotCountAsTopLevel() {
         var post = Post.create(ALICE, "alice", "p1", null);
-        var parent = Comment.create(post.getId(), ALICE, "alice", "c", null);
+        var parent = Comment.create(post, null, ALICE, "alice", "c");
         when(posts.findByIdForUpdate(post.getId())).thenReturn(Optional.of(post));
         when(comments.findByIdForUpdate(parent.getId())).thenReturn(Optional.of(parent));
 
@@ -158,6 +158,54 @@ class PostServiceTest {
         // case-insensitive, canonical username; unknown @ghost and self-mention @alice dropped
         order.verify(mentions).replace(post.getId(), List.of(new Mention(BOB, "Bob")));
         verify(profiles).findByLowerUsernameIn(Set.of("bob", "ghost", "alice")); // one batched lookup
+    }
+
+    @Test
+    void newPostAnnouncesItsResolvedMentionsInThePostCreatedEvent_beforeSave() {
+        when(profiles.findByLowerUsernameIn(any())).thenReturn(List.of(
+                new AuthorProfile(BOB, "bob", null, null), new AuthorProfile(ALICE, "alice", null, null)));
+        when(posts.save(any(Post.class))).thenAnswer(inv -> {
+            // what Spring Data publishes on save(): the event already carries the mentions
+            var event = com.socialapp.feed.domain.NotificationEventEnrichmentTest.events(inv.getArgument(0),
+                    com.socialapp.shared.events.PostCreatedEvent.class).get(0);
+            assertThat(event.mentionedUserIds()).containsExactly(BOB); // self-mention dropped
+            return inv.getArgument(0);
+        });
+
+        service.createPost(ALICE, "alice", "hi @bob and @alice and @ghost", null);
+
+        verify(posts).save(any(Post.class));
+    }
+
+    @Test
+    void quoteEventCarriesTheQuotedAuthor_andMentionsOfTheComment() {
+        var original = Post.create(BOB, "bob", "original", null);
+        when(posts.findById(original.getId())).thenReturn(Optional.of(original));
+        when(posts.findByIdForUpdate(original.getId())).thenReturn(Optional.of(original));
+        when(profiles.findByLowerUsernameIn(any())).thenReturn(List.of(new AuthorProfile(CAROL, "carol", null, null)));
+
+        var quote = service.quote(original.getId(), ALICE, "alice", "cc @carol");
+
+        var event = com.socialapp.feed.domain.NotificationEventEnrichmentTest.events(quote,
+                com.socialapp.shared.events.PostCreatedEvent.class).get(0);
+        assertThat(event.originalAuthorId()).isEqualTo(BOB);
+        assertThat(event.mentionedUserIds()).containsExactly(CAROL);
+    }
+
+    @Test
+    void addCommentRegistersCommentCreatedEventWithPostAndParentAuthors() {
+        var post = Post.create(BOB, "bob", "p", null);
+        var parent = Comment.create(post, null, CAROL, "carol", "c");
+        when(posts.findByIdForUpdate(post.getId())).thenReturn(Optional.of(post));
+        when(comments.findByIdForUpdate(parent.getId())).thenReturn(Optional.of(parent));
+
+        var reply = service.addComment(post.getId(), ALICE, "alice", "a reply", parent.getId());
+
+        var event = com.socialapp.feed.domain.NotificationEventEnrichmentTest.events(reply,
+                com.socialapp.shared.events.CommentCreatedEvent.class).get(0);
+        assertThat(event.postAuthorId()).isEqualTo(BOB);
+        assertThat(event.parentCommentAuthorId()).isEqualTo(CAROL);
+        assertThat(event.contentSnippet()).isEqualTo("a reply");
     }
 
     @Test

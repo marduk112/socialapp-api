@@ -5,6 +5,7 @@ import com.socialapp.shared.domain.ConflictException;
 import com.socialapp.shared.domain.ForbiddenOperationException;
 import com.socialapp.shared.events.PostCreatedEvent;
 import com.socialapp.shared.events.ReactionEvent;
+import com.socialapp.shared.events.Snippet;
 import jakarta.persistence.*;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
@@ -100,7 +101,7 @@ public class Post extends AggregateRoot<Post> {
         post.createdAt = Instant.now();
         post.updatedAt = post.createdAt;
 
-        post.registerCreated();
+        post.registerCreated(null);
         return post;
     }
 
@@ -111,7 +112,7 @@ public class Post extends AggregateRoot<Post> {
      */
     public static Post repost(UUID authorId, String authorUsername, Post target) {
         var post = derived(authorId, authorUsername, target, PostType.REPOST, "");
-        post.registerCreated();
+        post.registerCreated(target.authorId);
         return post;
     }
 
@@ -122,7 +123,7 @@ public class Post extends AggregateRoot<Post> {
         }
         requireWithinLimit(comment, "Quote comment");
         var post = derived(authorId, authorUsername, target, PostType.QUOTE, comment);
-        post.registerCreated();
+        post.registerCreated(target.authorId);
         return post;
     }
 
@@ -147,9 +148,25 @@ public class Post extends AggregateRoot<Post> {
         return post;
     }
 
-    private void registerCreated() {
+    private void registerCreated(UUID originalAuthorId) {
         registerEvent(new PostCreatedEvent(id, authorId, authorUsername, content, imageUrl, type.name(),
-                originalPostId));
+                originalPostId, originalAuthorId, originalContent, List.of()));
+    }
+
+    /**
+     * Records the users resolved from this post's {@code @mentions} in its pending {@link PostCreatedEvent}, so
+     * consumers (notifications) learn who was mentioned. Must be called BEFORE the post is saved (Spring Data
+     * publishes the registered events on {@code save()}); a post without a pending creation event (an edit) is left
+     * unchanged: mentions added by an edit are indexed but not announced.
+     */
+    public void announceMentions(List<Mention> mentions) {
+        var pending = List.copyOf(domainEvents());
+        if (pending.stream().noneMatch(e -> e instanceof PostCreatedEvent)) return;
+        var ids = mentions == null ? List.<UUID>of() : mentions.stream().map(Mention::userId).distinct().toList();
+        clearDomainEvents();
+        for (Object event : pending) {
+            registerEvent(event instanceof PostCreatedEvent created ? created.withMentionedUserIds(ids) : event);
+        }
     }
 
     /**
@@ -253,12 +270,14 @@ public class Post extends AggregateRoot<Post> {
             } else if (dislikesCount > 0) {
                 dislikesCount--;
             }
-            registerEvent(new ReactionEvent(this.id, userId, removed, ReactionEvent.ReactionAction.REMOVED));
+            registerEvent(ReactionEvent.onPost(id, authorId, Snippet.of(content), userId, removed,
+                    ReactionEvent.ReactionAction.REMOVED));
         }
         if (change.added() != null) {
             if (change.added() == ReactionEvent.ReactionType.LIKE) likesCount++;
             else dislikesCount++;
-            registerEvent(new ReactionEvent(this.id, userId, change.added(), ReactionEvent.ReactionAction.ADDED));
+            registerEvent(ReactionEvent.onPost(id, authorId, Snippet.of(content), userId, change.added(),
+                    ReactionEvent.ReactionAction.ADDED));
         }
         return change;
     }

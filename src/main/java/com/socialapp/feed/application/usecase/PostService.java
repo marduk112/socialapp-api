@@ -264,16 +264,14 @@ public class PostService {
         // Lock order is always post -> comment (same as deleteComment) to avoid deadlocks.
         // The post lock is needed for commentsCount and turns a missing post into a 404, not an FK error.
         var post = postRepository.findByIdForUpdate(postId).orElseThrow(() -> postNotFound(postId));
+        Comment parent = null;
         if (parentCommentId != null) {
             // Locked so a concurrent delete of the parent cannot slip in between check and insert.
-            var parent = commentRepository.findByIdForUpdate(parentCommentId)
+            parent = commentRepository.findByIdForUpdate(parentCommentId)
                     .orElseThrow(() -> new NotFoundException("Parent comment not found: " + parentCommentId));
-            if (!parent.belongsTo(postId)) {
-                throw new IllegalArgumentException("Parent comment " + parentCommentId
-                        + " does not belong to post " + postId);
-            }
         }
-        var comment = Comment.create(postId, authorId, currentUsername(authorId, authorUsername), content, parentCommentId);
+        // Rejects a parent of another post (400); registers CommentCreatedEvent (published on save via the outbox).
+        var comment = Comment.create(post, parent, authorId, currentUsername(authorId, authorUsername), content);
         // Only top-level comments contribute to the commentsCount
         if (parentCommentId == null) {
             post.incrementCommentsCount();
@@ -317,7 +315,7 @@ public class PostService {
         var comment = commentRepository.findByIdForUpdate(commentId).orElseThrow(() -> commentNotFound(commentId));
 
         var existing = commentReactionRepository.findByCommentIdAndUserId(commentId, userId);
-        var change = comment.react(typesOf(existing, CommentReaction::getReactionType), type, add);
+        var change = comment.react(userId, typesOf(existing, CommentReaction::getReactionType), type, add);
         if (change.isNoop()) return comment;
 
         commentReactionRepository.deleteAll(existing.stream()
@@ -333,13 +331,18 @@ public class PostService {
 
     /**
      * Saves the post and (re)writes its hashtags and resolved mentions in the same transaction. The post is
-     * flushed first because the index rows reference (and copy {@code created_at} from) its row.
+     * flushed first because the index rows reference (and copy {@code created_at} from) its row. A new post's
+     * resolved mention ids are also put into its PostCreatedEvent ({@link Post#announceMentions}).
      */
     private Post saveWithTextIndex(Post post) {
+        // Resolved before save(): a new post announces its mentions in its PostCreatedEvent, which Spring Data
+        // publishes (to the outbox) when save() is called.
+        var mentions = resolveMentions(post);
+        post.announceMentions(mentions);
         var saved = postRepository.save(post);
         postRepository.flush();
         hashtagRepository.replace(saved.getId(), saved.hashtags());
-        mentionRepository.replace(saved.getId(), resolveMentions(saved));
+        mentionRepository.replace(saved.getId(), mentions);
         return saved;
     }
 

@@ -101,6 +101,7 @@ kafka:
     post-events: post-events
     reaction-events: reaction-events
     social-events: social-events
+    comment-events: comment-events
 
 logging:
   level:

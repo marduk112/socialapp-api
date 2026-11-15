@@ -321,7 +321,7 @@ class OutboxRelayPostgresTest {
 
     private OutboxImporter importer() {
         var writer = new OutboxEventWriter(repository, relay, codec,
-                "user-events", "post-events", "reaction-events", "social-events");
+                "user-events", "post-events", "reaction-events", "social-events", "comment-events");
         return new OutboxImporter(repository, writer, relay,
                 new TransactionTemplate(new DataSourceTransactionManager(dataSource)));
     }
@@ -378,7 +378,7 @@ class OutboxRelayPostgresTest {
         var good = new com.socialapp.shared.events.UserFollowedEvent(UUID.randomUUID(), Instant.now(),
                 UUID.randomUUID(), UUID.randomUUID());
         var writer = new OutboxEventWriter(repository, relay, codec,
-                "user-events", "post-events", "reaction-events", "social-events");
+                "user-events", "post-events", "reaction-events", "social-events", "comment-events");
         var failingRepository = org.mockito.Mockito.spy(repository);
         org.mockito.Mockito.doCallRealMethod().doThrow(new IllegalStateException("boom"))
                 .when(failingRepository).appendIfAbsent(any());

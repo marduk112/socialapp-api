@@ -25,7 +25,8 @@ import java.util.List;
  * <ul>
  *   <li>Public: register, login, CORS preflight, uploaded images ({@code /uploads/**}).</li>
  *   <li>Everything else under {@code /api/**} requires a valid Bearer token
- *       (SSE stream additionally accepts {@code ?access_token=}).</li>
+ *       (the SSE streams {@code GET /api/v1/feed/stream} and {@code GET /api/v1/notifications/stream}
+ *       additionally accept {@code ?access_token=}, see {@link JwtAuthenticationFilter}).</li>
  *   <li>ASYNC/ERROR dispatches are permitted: the original REQUEST dispatch was already
  *       authorised, and the SecurityContext is not persisted between dispatches (stateless),
  *       so re-checking would break SSE completion and mask real errors as 401.</li>

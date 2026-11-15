@@ -61,6 +61,9 @@ public class KafkaConfig {
     @Value("${kafka.topics.social-events}")
     private String socialEventsTopic;
 
+    @Value("${kafka.topics.comment-events}")
+    private String commentEventsTopic;
+
     // ── Topics ────────────────────────────────────────────────────────────────
     @Bean
     public NewTopic userEventsTopic() {
@@ -83,6 +86,12 @@ public class KafkaConfig {
         return TopicBuilder.name(socialEventsTopic).partitions(PARTITIONS).replicas(1).build();
     }
 
+    /** Comments and replies (CommentCreatedEvent), key = postId. */
+    @Bean
+    public NewTopic commentEventsTopic() {
+        return TopicBuilder.name(commentEventsTopic).partitions(PARTITIONS).replicas(1).build();
+    }
+
     // DLTs need at least as many partitions as the source topic (the recoverer keeps the partition).
     @Bean
     public NewTopic userEventsDltTopic() {
@@ -102,6 +111,11 @@ public class KafkaConfig {
     @Bean
     public NewTopic socialEventsDltTopic() {
         return TopicBuilder.name(socialEventsTopic + DLT_SUFFIX).partitions(PARTITIONS).replicas(1).build();
+    }
+
+    @Bean
+    public NewTopic commentEventsDltTopic() {
+        return TopicBuilder.name(commentEventsTopic + DLT_SUFFIX).partitions(PARTITIONS).replicas(1).build();
     }
 
     // ── Producer ──────────────────────────────────────────────────────────────
@@ -222,5 +236,37 @@ public class KafkaConfig {
     @Bean
     public ConcurrentKafkaListenerContainerFactory<String, DomainEvent> feedSocialEventListenerContainerFactory() {
         return containerFactory(DomainEvent.class, "feed-follows-group");
+    }
+
+    // Notification BC: one listener + group per topic (group ids also on the @KafkaListener annotations).
+
+    /** Notification: user-events -> actor profile projection. */
+    @Bean
+    public ConcurrentKafkaListenerContainerFactory<String, DomainEvent> notificationUserEventListenerContainerFactory() {
+        return containerFactory(DomainEvent.class, "notification-users-group");
+    }
+
+    /** Notification: social-events -> FOLLOW. */
+    @Bean
+    public ConcurrentKafkaListenerContainerFactory<String, DomainEvent> notificationSocialEventListenerContainerFactory() {
+        return containerFactory(DomainEvent.class, "notification-social-group");
+    }
+
+    /** Notification: post-events -> MENTION / REPOST / QUOTE. */
+    @Bean
+    public ConcurrentKafkaListenerContainerFactory<String, DomainEvent> notificationPostEventListenerContainerFactory() {
+        return containerFactory(DomainEvent.class, "notification-posts-group");
+    }
+
+    /** Notification: reaction-events -> LIKE. */
+    @Bean
+    public ConcurrentKafkaListenerContainerFactory<String, DomainEvent> notificationReactionEventListenerContainerFactory() {
+        return containerFactory(DomainEvent.class, "notification-reactions-group");
+    }
+
+    /** Notification: comment-events -> COMMENT / REPLY. */
+    @Bean
+    public ConcurrentKafkaListenerContainerFactory<String, DomainEvent> notificationCommentEventListenerContainerFactory() {
+        return containerFactory(DomainEvent.class, "notification-comments-group");
     }
 }

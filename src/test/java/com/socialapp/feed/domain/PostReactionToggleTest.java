@@ -50,13 +50,13 @@ class PostReactionToggleTest {
 
     @Test
     void commentToggleFollowsSameRules() {
-        var comment = Comment.create(UUID.randomUUID(), UUID.randomUUID(), "author", "c", null);
+        var comment = Comment.create(Post.create(UUID.randomUUID(), "p", "post", null), null, UUID.randomUUID(), "author", "c");
 
-        comment.react(Set.of(), ReactionType.DISLIKE, true);
-        comment.react(EnumSet.of(ReactionType.DISLIKE), ReactionType.DISLIKE, true);
+        comment.react(USER, Set.of(), ReactionType.DISLIKE, true);
+        comment.react(USER, EnumSet.of(ReactionType.DISLIKE), ReactionType.DISLIKE, true);
         assertThat(comment.getDislikesCount()).isEqualTo(1);
 
-        comment.react(EnumSet.of(ReactionType.DISLIKE), ReactionType.DISLIKE, false);
+        comment.react(USER, EnumSet.of(ReactionType.DISLIKE), ReactionType.DISLIKE, false);
         assertThat(comment.getDislikesCount()).isZero();
     }
 }

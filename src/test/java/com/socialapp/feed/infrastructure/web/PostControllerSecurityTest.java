@@ -305,7 +305,7 @@ class PostControllerSecurityTest {
 
     @Test
     void editingSomeoneElsesCommentIsForbidden() throws Exception {
-        var alicesComment = Comment.create(UUID.randomUUID(), ALICE, "alice", "nice", null);
+        var alicesComment = Comment.create(Post.create(BOB, "bob", "p", null), null, ALICE, "alice", "nice");
         when(commentRepository.findById(alicesComment.getId())).thenReturn(Optional.of(alicesComment));
 
         mvc.perform(put("/api/v1/comments/{id}", alicesComment.getId())

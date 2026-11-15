@@ -18,7 +18,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  *
  * <p>Routing is identical to the former {@code KafkaEventPublisher}: user events -> user-events keyed
  * by userId, post events -> post-events keyed by postId, reactions -> reaction-events keyed by postId.
- * Follow events -> social-events keyed by followerId; they do not come from a JPA aggregate but are
+ * Comment events -> comment-events keyed by postId (stage 3A). Follow events -> social-events keyed by followerId; they do not come from a JPA aggregate but are
  * imported from SocialGraph's Neo4j outbox by {@link OutboxImporter} (which reuses {@link #routeOf}).
  * The sealed {@link DomainEvent} makes the switch exhaustive, so a new event type cannot be forgotten.
  *
@@ -37,12 +37,14 @@ public class OutboxEventWriter {
     private final String postEventsTopic;
     private final String reactionEventsTopic;
     private final String socialEventsTopic;
+    private final String commentEventsTopic;
 
     public OutboxEventWriter(OutboxRepository repository, OutboxRelay relay, DomainEventCodec codec,
                              @Value("${kafka.topics.user-events}") String userEventsTopic,
                              @Value("${kafka.topics.post-events}") String postEventsTopic,
                              @Value("${kafka.topics.reaction-events}") String reactionEventsTopic,
-                             @Value("${kafka.topics.social-events}") String socialEventsTopic) {
+                             @Value("${kafka.topics.social-events}") String socialEventsTopic,
+                             @Value("${kafka.topics.comment-events}") String commentEventsTopic) {
         this.repository = repository;
         this.relay = relay;
         this.codec = codec;
@@ -50,6 +52,7 @@ public class OutboxEventWriter {
         this.postEventsTopic = postEventsTopic;
         this.reactionEventsTopic = reactionEventsTopic;
         this.socialEventsTopic = socialEventsTopic;
+        this.commentEventsTopic = commentEventsTopic;
     }
 
     /** Where an event goes on Kafka. */
@@ -60,7 +63,10 @@ public class OutboxEventWriter {
             case UserCreatedEvent e -> new Route("User", userEventsTopic, e.userId().toString());
             case UserUpdatedEvent e -> new Route("User", userEventsTopic, e.userId().toString());
             case PostCreatedEvent e -> new Route("Post", postEventsTopic, e.postId().toString());
-            case ReactionEvent e -> new Route("Post", reactionEventsTopic, e.postId().toString());
+            // Comment reactions (since 3A) are keyed by their post too, so all reactions of a post stay ordered.
+            case ReactionEvent e -> new Route(e.target() == ReactionEvent.ReactionTarget.COMMENT ? "Comment" : "Post",
+                    reactionEventsTopic, e.postId().toString());
+            case CommentCreatedEvent e -> new Route("Comment", commentEventsTopic, e.postId().toString());
             case UserFollowedEvent e -> new Route("Follow", socialEventsTopic, e.followerId().toString());
             case UserUnfollowedEvent e -> new Route("Follow", socialEventsTopic, e.followerId().toString());
         };

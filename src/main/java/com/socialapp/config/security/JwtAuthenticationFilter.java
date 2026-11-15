@@ -19,7 +19,8 @@ import java.io.IOException;
 /**
  * Authenticates requests carrying {@code Authorization: Bearer <jwt>}.
  * <p>
- * For the SSE endpoint only ({@value #SSE_PATH}, GET), the token may also be passed as the
+ * For the SSE endpoints only ({@value #SSE_PATH} and {@value #NOTIFICATIONS_SSE_PATH}, GET), the token may also be
+ * passed as the
  * {@value #QUERY_TOKEN_PARAM} query parameter, because the browser {@code EventSource} API
  * cannot send headers.
  * <p>
@@ -33,6 +34,7 @@ import java.io.IOException;
 public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
     static final String SSE_PATH = "/api/v1/feed/stream";
+    static final String NOTIFICATIONS_SSE_PATH = "/api/v1/notifications/stream";
     static final String QUERY_TOKEN_PARAM = "access_token";
     static final String INVALID_TOKEN_ATTRIBUTE = JwtAuthenticationFilter.class.getName() + ".INVALID_TOKEN";
     private static final String BEARER_PREFIX = "bearer ";
@@ -81,6 +83,6 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             return false;
         }
         String path = request.getRequestURI().substring(request.getContextPath().length());
-        return SSE_PATH.equals(path);
+        return SSE_PATH.equals(path) || NOTIFICATIONS_SSE_PATH.equals(path);
     }
 }
