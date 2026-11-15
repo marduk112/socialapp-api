@@ -3,6 +3,7 @@ package com.socialapp.feed.infrastructure.sse;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.socialapp.feed.application.timeline.FeedScope;
 import com.socialapp.feed.application.timeline.FolloweeLookup;
+import com.socialapp.feed.application.media.MediaView;
 import com.socialapp.feed.domain.Mention;
 import com.socialapp.feed.domain.PostType;
 import com.socialapp.feed.infrastructure.web.PostResponse;
@@ -59,7 +60,7 @@ public class FeedSseService {
      * {@code original} (a {@link PostResponse}, same shape and nesting rules as in REST, built from the database at
      * broadcast time; viewer-specific fields are {@code viewerReposted = false}, {@code bookmarked = false}, {@code userReaction = null}; the
      * payload itself has no viewer flags, a broadcast is viewer-agnostic: clients treat a live post as not bookmarked) were
-     * added in stage 2C.
+     * added in stage 2C; {@code media} (public data, like PostResponse.media) in stage 3C.
      */
     public record PostSsePayload(
             UUID postId,
@@ -80,13 +81,25 @@ public class FeedSseService {
             PostType type,
             // Author of the embedded original; null for a POST or when the original is gone.
             UUID originalAuthorId,
-            // The embedded original of a REPOST/QUOTE (null for a POST or when it is gone).
-            PostResponse original
+            // The embedded original of a REPOST/QUOTE (null for a POST or when it is gone); carries its own media.
+            PostResponse original,
+            // The post's own images, same shape and order as PostResponse.media (stage 3C); never null.
+            List<MediaView> media
     ) {
         public PostSsePayload {
             hashtags = hashtags == null ? List.of() : List.copyOf(hashtags);
             mentions = mentions == null ? List.of() : List.copyOf(mentions);
             type = type == null ? PostType.POST : type;
+            media = media == null ? List.of() : List.copyOf(media);
+        }
+
+        /** Pre-3C shape (no media). */
+        public PostSsePayload(UUID postId, UUID authorId, String authorUsername, String authorAvatarUrl,
+                              String content, String imageUrl, Instant occurredAt, UUID originalPostId,
+                              String originalAuthorUsername, String originalContent, List<String> hashtags,
+                              List<Mention> mentions, PostType type, UUID originalAuthorId, PostResponse original) {
+            this(postId, authorId, authorUsername, authorAvatarUrl, content, imageUrl, occurredAt, originalPostId,
+                    originalAuthorUsername, originalContent, hashtags, mentions, type, originalAuthorId, original, null);
         }
 
         /** A plain post (pre-2C shape). */
@@ -95,7 +108,7 @@ public class FeedSseService {
                               String originalAuthorUsername, String originalContent, List<String> hashtags,
                               List<Mention> mentions) {
             this(postId, authorId, authorUsername, authorAvatarUrl, content, imageUrl, occurredAt, originalPostId,
-                    originalAuthorUsername, originalContent, hashtags, mentions, PostType.POST, null, null);
+                    originalAuthorUsername, originalContent, hashtags, mentions, PostType.POST, null, null, null);
         }
     }
 

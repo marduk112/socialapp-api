@@ -144,6 +144,7 @@ class SocialAppIntegrationTest {
         // graceful shutdown wake its acceptor via 127.0.0.1; with a wildcard bind it connects to a non-loopback
         // interface address, which sandboxed/firewalled machines block: 2 s wait + "Socket accept failed" ERROR.
         registry.add("server.address", () -> "127.0.0.1");
+        registry.add("app.media.cleanup-enabled", () -> "false"); // scheduled media purge off in tests
     }
 
     @Autowired UserService userService;

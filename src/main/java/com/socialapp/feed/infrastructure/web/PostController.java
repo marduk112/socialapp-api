@@ -9,6 +9,7 @@ import com.socialapp.feed.application.usecase.PostService;
 import com.socialapp.feed.application.usecase.PostView;
 import com.socialapp.feed.domain.Comment;
 import com.socialapp.feed.domain.Post;
+import com.socialapp.feed.domain.PostMedia;
 import com.socialapp.feed.infrastructure.sse.FeedSseService;
 import com.socialapp.shared.events.ReactionEvent;
 import com.socialapp.shared.security.AuthenticatedUser;
@@ -86,11 +87,18 @@ public class PostController {
     }
 
     // ── Posts CRUD ─────────────────────────────────────────────────────────────
+
+    /**
+     * Creates a post. {@code mediaIds} (optional, max 4, no duplicates): unattached uploads of the caller
+     * ({@code POST /media}), attached in this order atomically with the post; unknown or another user's upload -> 404,
+     * already attached, more than 4 or duplicates -> 400. {@code content} stays required. Media cannot be changed
+     * by an edit.
+     */
     @PostMapping("/posts")
     public ResponseEntity<PostResponse> createPost(
             @AuthenticationPrincipal AuthenticatedUser me,
             @Valid @RequestBody CreatePostRequest req) {
-        var post = postService.createPost(me.id(), me.username(), req.content(), req.imageUrl());
+        var post = postService.createPost(me.id(), me.username(), req.content(), req.imageUrl(), req.mediaIds());
         return ResponseEntity.status(HttpStatus.CREATED).body(enriched(post, me));
     }
 
@@ -140,13 +148,16 @@ public class PostController {
         return ResponseEntity.noContent().build();
     }
 
-    /** Quotes post {@code id} with a required comment (1..500 code points): 201 with the QUOTE. */
+    /**
+     * Quotes post {@code id} with a required comment (1..500 code points) and optional images ({@code mediaIds}, same
+     * rules as {@code POST /posts}): 201 with the QUOTE.
+     */
     @PostMapping("/posts/{id}/quote")
     public ResponseEntity<PostResponse> quote(
             @PathVariable UUID id,
             @AuthenticationPrincipal AuthenticatedUser me,
             @Valid @RequestBody QuotePostRequest req) {
-        var post = postService.quote(id, me.id(), me.username(), req.comment());
+        var post = postService.quote(id, me.id(), me.username(), req.comment(), req.mediaIds());
         return ResponseEntity.status(HttpStatus.CREATED).body(enriched(post, me));
     }
 
@@ -324,7 +335,8 @@ public class PostController {
     // Post text limits count code points (see MaxCodePoints); the domain enforces the same limit.
     record CreatePostRequest(
             @NotBlank @MaxCodePoints(Post.MAX_CONTENT_LENGTH) String content,
-            String imageUrl
+            String imageUrl,
+            @Size(max = PostMedia.MAX_PER_POST) List<UUID> mediaIds
     ) {}
 
     record UpdatePostRequest(
@@ -339,7 +351,8 @@ public class PostController {
     ) {}
 
     record QuotePostRequest(
-            @NotBlank @MaxCodePoints(Post.MAX_CONTENT_LENGTH) String comment
+            @NotBlank @MaxCodePoints(Post.MAX_CONTENT_LENGTH) String comment,
+            @Size(max = PostMedia.MAX_PER_POST) List<UUID> mediaIds
     ) {}
 
     record CreateCommentRequest(

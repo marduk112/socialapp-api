@@ -30,9 +30,12 @@ class PostEventConsumerTest {
     private final PostReactionRepository reactions = mock(PostReactionRepository.class);
     private final PostHashtagRepository hashtags = mock(PostHashtagRepository.class);
     private final PostMentionRepository mentions = mock(PostMentionRepository.class);
+    private final PostMediaRepository media = mock(PostMediaRepository.class);
+    private final com.socialapp.feed.application.media.MediaStorage storage =
+            mock(com.socialapp.feed.application.media.MediaStorage.class);
     private final PostService postService = new PostService(posts, reactions, mock(CommentRepository.class),
             mock(CommentReactionRepository.class), profiles, hashtags, mentions,
-            mock(BookmarkRepository.class));
+            mock(BookmarkRepository.class), media, storage);
     private final PostEventConsumer consumer = new PostEventConsumer(sse, profiles, posts, postService);
 
     private FeedSseService.PostSsePayload broadcastOf(PostCreatedEvent event) {
@@ -76,6 +79,30 @@ class PostEventConsumerTest {
     }
 
     @Test
+    void quotePayloadCarriesItsMediaAndTheEmbeddedOriginalsMedia_inPositionOrder() {
+        var original = Post.create(BOB, "bob", "orig", null);
+        var quote = Post.quote(ALICE, "alice", original, "look");
+        stored(original, quote);
+        var o1 = PostMedia.upload(BOB, ImageFormat.PNG, 10, 20, 100);
+        o1.attachTo(original.getId(), 0, BOB);
+        var q1 = PostMedia.upload(ALICE, ImageFormat.JPEG, 30, 40, 100);
+        var q2 = PostMedia.upload(ALICE, ImageFormat.GIF, 50, 60, 100);
+        q1.attachTo(quote.getId(), 0, ALICE);
+        q2.attachTo(quote.getId(), 1, ALICE);
+        when(media.findByPostIds(any())).thenReturn(List.of(o1, q1, q2));
+        when(storage.publicUrl(any())).thenAnswer(inv -> "http://h/uploads/media/" + inv.getArgument(0));
+
+        var payload = broadcastOf(eventOf(quote));
+
+        assertThat(payload.media()).extracting(m -> m.id()).containsExactly(q1.getId(), q2.getId());
+        assertThat(payload.media().get(0).url()).isEqualTo("http://h/uploads/media/" + q1.getStorageKey());
+        assertThat(payload.media().get(1).width()).isEqualTo(50);
+        assertThat(payload.original().media()).extracting(m -> m.id()).containsExactly(o1.getId());
+        assertThat(payload.original().media().get(0).height()).isEqualTo(20);
+        verify(media, times(1)).findByPostIds(any()); // one batch for the post and its original
+    }
+
+    @Test
     void postWithoutTagsOrAlreadyDeletedGetsEmptyLists() {
         when(posts.findById(any())).thenReturn(Optional.empty());
 
@@ -83,8 +110,9 @@ class PostEventConsumerTest {
 
         assertThat(payload.hashtags()).isEmpty();
         assertThat(payload.mentions()).isEmpty();
+        assertThat(payload.media()).isEmpty();
         assertThat(payload.type()).isEqualTo(PostType.POST);
-        verifyNoInteractions(hashtags, mentions);
+        verifyNoInteractions(hashtags, mentions, media);
     }
 
     @Test

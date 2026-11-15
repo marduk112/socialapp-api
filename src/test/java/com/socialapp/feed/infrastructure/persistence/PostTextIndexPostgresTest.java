@@ -41,7 +41,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @DataJpaTest
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @Testcontainers(disabledWithoutDocker = true)
-@Import({PostService.class, TimelineService.class, JdbcPostHashtagRepository.class, JdbcPostMentionRepository.class})
+@Import({PostService.class, TimelineService.class, JdbcPostHashtagRepository.class, JdbcPostMentionRepository.class, com.socialapp.feed.infrastructure.media.MediaAdapters.class})
 class PostTextIndexPostgresTest {
 
     @Container

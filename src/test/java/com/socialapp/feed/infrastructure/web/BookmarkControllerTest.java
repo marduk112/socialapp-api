@@ -49,6 +49,8 @@ class BookmarkControllerTest {
     @MockitoBean PostMentionRepository postMentionRepository;
     @MockitoBean BookmarkRepository bookmarkRepository;
     @MockitoBean FeedSseService feedSseService;
+    @MockitoBean PostMediaRepository postMediaRepository;
+    @MockitoBean com.socialapp.feed.application.media.MediaStorage mediaStorage;
 
     private String bearer(UUID userId) {
         return "Bearer " + jwtService.issueToken(userId, "user");

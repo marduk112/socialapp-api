@@ -29,12 +29,16 @@ com.socialapp
 │       └── backfill/   FollowProjectionBackfill, FollowBackfillStore (pre-2A follows -> social-events)
 └── feed/
     ├── domain/       Post, PostType, Comment, PostReaction, Follow, Bookmark (+ repositories), HashtagParser, MentionParser,
-    │                 Mention, PostHashtagRepository / PostMentionRepository (ports)
+    │                 Mention, PostHashtagRepository / PostMentionRepository (ports), PostMedia + PostMediaRepository,
+    │                 ImageFormat (3C)
     ├── application/  usecase/  PostService, PostView, AuthorProfileProjection, FollowProjection,
     │                           MentionLookup, PostTextIndexBackfill (pre-2B hashtags/mentions), BookmarkService (3B)
     │                 timeline/ TimelineService, FeedCursor, FeedScope, FeedPage, FolloweeLookup
+    │                 media/    MediaService, ImageInspector, MediaStorage (port), MediaView, MediaProperties,
+    │                           MediaRejectedException (3C)
     └── infrastructure/
-        ├── web/      PostController, PostResponse (REST + SSE `original` shape), MaxCodePoints
+        ├── web/      PostController, PostResponse (REST + SSE `original` shape), MaxCodePoints, MediaController
+        ├── media/    LocalDiskMediaStorage, MediaFileController (GET /uploads/media/**), MediaCleanupJob, MediaConfig
         ├── persistence/ JdbcPostHashtagRepository, JdbcPostMentionRepository (JDBC, same JPA tx)
         ├── sse/      FeedSseService
         └── messaging/ PostEventConsumer, UserEventConsumer, SocialEventConsumer
@@ -234,6 +238,10 @@ Current migrations:
   and the unread count), `notification_actor_profiles`, `notification_cutoff` (one row: migration time). No FKs.
 - `V21__bookmarks.sql` — `bookmarks (user_id, post_id FK posts ON DELETE CASCADE, created_at; PK (user_id, post_id))`, index
   `ix_bookmarks_user_created_post (user_id, created_at DESC, post_id DESC)` (see "Bookmarks")
+- `V22__post_media.sql` — `post_media (id PK, owner_id, post_id NULL FK posts ON DELETE CASCADE, position 0..3 NULL, content_type,
+  width, height, size_bytes, storage_key UNIQUE, created_at)`, CHECKs (types, attached <=> post_id+position, sizes), partial
+  unique `ux_post_media_post_position (post_id, position)`, partial `ix_post_media_unattached_owner (owner_id, created_at)` and
+  `ix_post_media_unattached_created (created_at)` (both `WHERE post_id IS NULL`). No FK to users (see "Images in posts")
 
 **Always create a new numbered migration file. Never modify existing ones.**
 
@@ -350,13 +358,15 @@ REPOST/QUOTE, null for a POST or when the original is gone. One level only (the 
 if the quoted post is gone). Flat legacy fields `originalPostId`, `originalAuthorUsername`, `originalContent` are
 kept (snapshot at creation). For a REPOST item, top-level `content` is "" and its counters/reactions are those of the
 repost row itself (clients act on `original`). Query budget per page, independent of its size: <= 2 for the originals
-(level 1, then level 2) + avatars + hashtags + mentions + counts + (with a viewer) reposted flags + reactions = <= 8.
+(level 1, then level 2) + avatars + hashtags + mentions + media + counts + (with a viewer) reposted flags + bookmarks +
+reactions = <= 10. `media` (3C) see "Images in posts".
 Timelines (`all`, `following`) contain REPOST and QUOTE items ordered by their own `created_at` like any post.
 
 Endpoints:
 - `POST /api/v1/posts/{id}/repost` (no body) -> 201 PostResponse (type REPOST) | 200 if the caller already reposted it.
 - `DELETE /api/v1/posts/{id}/repost` -> 204 always ({id} = original id or a repost item id).
-- `POST /api/v1/posts/{id}/quote` `{ "comment": string }` -> 201 PostResponse (type QUOTE); blank/missing/> 500 -> 400.
+- `POST /api/v1/posts/{id}/quote` `{ "comment": string, "mediaIds"?: uuid[] }` -> 201 PostResponse (type QUOTE);
+  blank/missing/> 500 -> 400 (`mediaIds`: see "Images in posts").
 - `POST /api/v1/posts/{id}/share` `{ "comment"?: string }` - **DEPRECATED alias** (kept so older clients work): blank or
   missing comment -> repost semantics (201/200), otherwise quote (201). Use `/repost` or `/quote`.
 
@@ -384,6 +394,62 @@ Private "saved posts" in Feed (Postgres/JPA); no Kafka events, no other BC invol
   `original` has `bookmarked=false` and the payload carries no flag (clients treat live posts as not bookmarked).
 - Tests: `BookmarkServiceTest`, `BookmarkControllerTest` (web), `BookmarkPostgresTest`, `BookmarkIntegrationTest`.
 
+## Images in posts (stage 3C)
+
+Feed only (Postgres/JPA + files behind the `MediaStorage` port; today `LocalDiskMediaStorage`, an S3/MinIO adapter can
+replace it: store/delete/publicUrl). No Kafka event changes; the SSE payload carries `media`.
+
+**Upload** `POST /api/v1/media` (auth, multipart field `file`) -> 201 `{id, url, width, height}`, stored UNATTACHED and owned
+by the caller. Errors are JSON `{error, timestamp}`: missing/empty file or not multipart 400; > 5 MB (`app.media.max-bytes`,
+or the multipart limit) or > 8000 px per side / > 50 MP / too many frames 413; not an accepted image 415; > 20 pending
+unattached uploads per user 429 (`app.media.max-pending-per-user`, counted under a per-user advisory lock, so concurrent
+uploads cannot exceed it); all decode slots busy for 30 s 503; no token 401. Order: validate bytes (no tx) -> commit the row ->
+write the file (on failure the row is deleted, 500). A crash in between leaves only a row without a file, purged later.
+
+**Validation** (`ImageInspector`, pure JDK; client Content-Type and file name are never read): magic bytes pick JPEG/PNG/GIF/WebP
+(SVG, HTML, PDF, BMP, TIFF, HEIC... -> 415); whole-file scan for HTML/script markers (`<script`, `<iframe`, `<html `...) -> 415;
+structural walk to the end marker with bounds and PNG CRC checks (PNG/GIF/WebP: trailing data -> 415; JPEG: data after EOI,
+e.g. motion-photo videos / Ultra HDR gain maps, is cut off); limits from the headers before decoding (decompression bombs);
+first frame decoded by ImageIO with subsampling (max 2 concurrent). WebP has no JDK decoder: structural validation only.
+**Metadata is stripped** structurally (no re-encode): JPEG APP1 EXIF/XMP (GPS!), APP13, COM, MPF (EXIF orientation is kept as a
+minimal EXIF segment and applied to the reported width/height), PNG tEXt/zTXt/iTXt/eXIf/tIME, GIF comment/plain-text/app
+extensions except the loop, WebP EXIF/XMP. ICC profiles are kept.
+
+**Storage / serving:** file name = server-generated key `<random uuid>.<ext>` (ext from the detected format; unrelated to the
+media id) in `app.media.dir` (default `./uploads/media`, git-ignored via `uploads/`). `GET /uploads/media/{key}` (public, like
+avatars) is served by `MediaFileController`, not a static handler: only keys matching the exact shape are looked up (no
+traversal), Content-Type from the extension, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none';
+sandbox`, `Cache-Control: public, max-age=86400`. URL = `app.base-url` + `/uploads/media/<key>` (absolute, like avatar URLs;
+the frontend dev server loads it directly from :8080, `<img>` needs no CORS/proxy). `WebConfig` now maps only
+`/uploads/avatars/**` (from `app.upload.dir`) statically.
+
+**Attach:** `POST /posts` and `POST /posts/{id}/quote` take optional `mediaIds: uuid[]` (max 4 = `PostMedia.MAX_PER_POST`, no
+duplicates, else 400). `PostService` locks the uploads (`SELECT ... FOR UPDATE`, id order) before saving the post and attaches
+them (post_id + position = request order) in the same transaction: unknown or someone else's upload -> 404 `Media not found`
+(indistinguishable, nothing leaks), already attached -> 400; any failure rolls back the post. Content stays required (no
+media-only posts); reposts have no media; edits never change media. Concurrent attaches of one upload: exactly one wins.
+
+**Read:** `PostResponse.media` (every endpoint, nested `original` included; SSE `new-post` payload `media` and its `original`)
+= `[{id, url, width, height}]` ordered by position, `[]` when none. ONE query per page for the posts and their originals
+(`PostMediaRepository.findByPostIds`) in `PostService.views`; URLs are built from rows only, so a missing file never breaks
+a list (the browser gets a 404 for that image).
+
+**Delete:** deleting a post cascades its `post_media` rows (FK); `PostService.deletePost` deletes the files after commit
+(best effort, logged, never fails the delete; a rollback keeps them). QUOTEs of a deleted original keep their own media.
+**Cleanup:** `MediaService.purgeExpired` deletes unattached uploads older than `app.media.unattached-ttl` (24h) in batches
+(`FOR UPDATE SKIP LOCKED`, so an upload being attached is never deleted), then their files. Scheduled by `MediaCleanupJob`
+every `cleanup-interval-ms` (first run after the same delay), off with `app.media.cleanup-enabled: false` (set in all
+integration tests); stops between batches on shutdown.
+
+Config (`app.media.*`): `dir` (./uploads/media), `max-bytes` (5242880), `max-pending-per-user` (20), `unattached-ttl` (24h),
+`cleanup-enabled` (true), `cleanup-interval-ms` (3600000), `cleanup-batch-size` (500). `spring.servlet.multipart.max-file-size`
+is 5MB / `max-request-size` 6MB globally; the avatar endpoint keeps its own 2 MB check. Multipart limit errors -> 413 JSON,
+non-multipart -> 400 JSON, malformed JSON bodies -> 400 JSON (`GlobalExceptionHandler`).
+Known limits: no rate limit beyond the pending cap; WebP not decoded; files of a failed delete stay (logged); deleted posts'
+images may stay in browser/proxy caches up to a day.
+Tests: `ImageInspectorTest`, `LocalDiskMediaStorageTest`, `MediaControllerTest` (web), `PostControllerSecurityTest` (mediaIds),
+`PostMediaPostgresTest` (attach/order/concurrency/cascade/cleanup/N+1), `PostEventConsumerTest` (SSE), `MediaIntegrationTest`.
+
 ## SSE (Server-Sent Events)
 
 `GET /api/v1/feed/stream?access_token=...&scope=all|following` (default `all`).
@@ -394,7 +460,7 @@ Private "saved posts" in Feed (Postgres/JPA); no Kafka events, no other BC invol
   without reconnecting
 - Iterates all admitted emitters
 - Sends event with `EventBuilder.event("new-post")`; payload `PostSsePayload` includes `hashtags` and `mentions`
-  (same shapes as `PostResponse`, read from Feed's tables by `PostEventConsumer`, never null), and since 2C `type`,
+  (same shapes as `PostResponse`, read from Feed's tables by `PostEventConsumer`, never null; since 3C also `media`), and since 2C `type`,
   `originalAuthorId` and `original` (a `PostResponse` built by `PostService.views` without a viewer: same nesting
   rules as REST, `viewerReposted = false`, `userReaction = null`). Pre-2C field names are unchanged (`postId`).
   The following-scope filter uses the payload's `authorId` (the reposter/quoter).
@@ -456,7 +522,8 @@ Stateless JWT (Spring Security + jjwt, HS256). `config/security/SecurityConfig` 
 `usermanagement/infrastructure/security/JwtService` issues/verifies tokens (`sub` = user UUID, `username` claim).
 Config: `app.jwt.secret` (env `APP_JWT_SECRET`, >= 32 bytes) and `app.jwt.expiration-minutes`.
 
-- Public: `POST /api/v1/users`, `POST /api/v1/users/login` (both return user fields + `token`), `GET /uploads/**`, CORS preflight.
+- Public: `POST /api/v1/users`, `POST /api/v1/users/login` (both return user fields + `token`), `GET /uploads/**` (avatars,
+  post images), CORS preflight.
 - Everything else needs `Authorization: Bearer <token>`; the SSE streams `GET /api/v1/feed/stream` and
   `GET /api/v1/notifications/stream` (only these two paths, GET only) also accept `?access_token=`
   (`JwtAuthenticationFilter`).
@@ -475,6 +542,8 @@ Config: `app.jwt.secret` (env `APP_JWT_SECRET`, >= 32 bytes) and `app.jwt.expira
 - `NotificationIntegrationTest` (same container/context lifecycle): follow/like/unlike/comment/reply/mention/repost/quote
   over HTTP -> outbox -> Kafka -> Notification -> REST + SSE (isolation between users), and the enriched outbox rows.
 - `BookmarkIntegrationTest` (same lifecycle): bookmark/list/page/flag/isolation/cascade over HTTP.
+- `MediaIntegrationTest` (same lifecycle): upload (real Tomcat multipart limits) -> attach -> feed/post/SSE media -> serving
+  headers -> delete removes rows and files; purge of expired uploads.
 - Kafka error handling is tested end to end for both a malformed record (DeserializationException -> DLT at once) and a
   record that deserializes but keeps failing in the listener (3 attempts, then `<topic>.DLT` with `kafka_dlt-*` headers;
   later records of the same partition still processed).

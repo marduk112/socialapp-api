@@ -220,6 +220,18 @@ class UserControllerSecurityTest {
         verify(userService, never()).updateAvatar(any(), any());
     }
 
+    /** The global multipart limit was raised to 5 MB for post images (3C); the avatar keeps its own 2 MB limit. */
+    @Test
+    void avatarLargerThan2MbIsStillRejectedWith413() throws Exception {
+        var big = new MockMultipartFile("file", "a.png", "image/png", new byte[2 * 1024 * 1024 + 1]);
+
+        mvc.perform(multipart("/api/v1/users/{id}/avatar", alice.getId()).file(big)
+                        .header(HttpHeaders.AUTHORIZATION, bearer(alice)))
+                .andExpect(status().isPayloadTooLarge());
+
+        verify(userService, never()).updateAvatar(any(), any());
+    }
+
     @Test
     void followUsesPrincipalAsFollowerAndIgnoresBodyFollowerId() throws Exception {
         UUID carol = UUID.randomUUID();

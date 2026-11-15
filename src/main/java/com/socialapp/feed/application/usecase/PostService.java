@@ -1,5 +1,7 @@
 package com.socialapp.feed.application.usecase;
 
+import com.socialapp.feed.application.media.MediaStorage;
+import com.socialapp.feed.application.media.MediaView;
 import com.socialapp.feed.domain.*;
 import com.socialapp.shared.domain.NotFoundException;
 import com.socialapp.shared.events.ReactionEvent;
@@ -7,6 +9,8 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.util.*;
 import java.util.stream.Collectors;
@@ -23,13 +27,25 @@ public class PostService {
     private final PostHashtagRepository hashtagRepository;
     private final PostMentionRepository mentionRepository;
     private final BookmarkRepository bookmarkRepository;
+    private final PostMediaRepository mediaRepository;
+    private final MediaStorage mediaStorage;
 
     // ── Posts CRUD ──────────────────────────────────────────────────────────────
 
     @Transactional
     public Post createPost(UUID authorId, String authorUsername, String content, String imageUrl) {
+        return createPost(authorId, authorUsername, content, imageUrl, List.of());
+    }
+
+    /**
+     * Creates a post with up to {@link PostMedia#MAX_PER_POST} images, attached atomically in the same transaction
+     * (see {@link #lockAttachable}): either the post and all its images, or nothing.
+     */
+    @Transactional
+    public Post createPost(UUID authorId, String authorUsername, String content, String imageUrl, List<UUID> mediaIds) {
+        var media = lockAttachable(mediaIds, authorId);
         var post = Post.create(authorId, currentUsername(authorId, authorUsername), content, imageUrl);
-        return saveWithTextIndex(post);
+        return attach(saveWithTextIndex(post), media, authorId);
     }
 
     @Transactional(readOnly = true)
@@ -59,11 +75,14 @@ public class PostService {
     public void deletePost(UUID postId, UUID requesterId) {
         var post = postRepository.findByIdForUpdate(postId).orElseThrow(() -> postNotFound(postId));
         post.ensureAuthoredBy(requesterId, "delete");
+        // Only the post's own images: its REPOSTs have none, its QUOTEs keep theirs.
+        var mediaKeys = mediaRepository.findStorageKeysByPostId(postId);
         if (!post.isRepost()) { // nothing ever points at a REPOST (flattened)
             postRepository.deleteRepostsOf(postId);
             postRepository.detachQuotesOf(postId);
         }
-        postRepository.delete(post);
+        postRepository.delete(post); // post_media rows cascade (V22 FK)
+        deleteFilesAfterCommit(mediaKeys);
     }
 
     // ── Reposts and quotes ─────────────────────────────────────────────────────
@@ -112,9 +131,17 @@ public class PostService {
      */
     @Transactional
     public Post quote(UUID targetId, UUID authorId, String authorUsername, String comment) {
+        return quote(targetId, authorId, authorUsername, comment, List.of());
+    }
+
+    /** {@link #quote(UUID, UUID, String, String)} with up to {@link PostMedia#MAX_PER_POST} images of the quote itself. */
+    @Transactional
+    public Post quote(UUID targetId, UUID authorId, String authorUsername, String comment, List<UUID> mediaIds) {
+        validateMediaIds(mediaIds); // cheap checks before taking the original's lock
         var original = lockTarget(targetId);
+        var media = lockAttachable(mediaIds, authorId);
         var quote = Post.quote(authorId, currentUsername(authorId, authorUsername), original, comment);
-        return saveWithTextIndex(quote);
+        return attach(saveWithTextIndex(quote), media, authorId);
     }
 
     /**
@@ -148,8 +175,9 @@ public class PostService {
      *
      * <p>Constant number of queries regardless of the number of posts: at most two for the originals (the
      * embedded originals, then the quoted posts of reposted quotes), then one IN query each for avatars,
-     * hashtags, mentions, repost/quote counts and - with a viewer - reposted flags, bookmarks and reactions, all covering the
-     * page posts and their originals together. No N+1.
+     * hashtags, mentions, media, repost/quote counts and - with a viewer - reposted flags, bookmarks and reactions, all
+     * covering the page posts and their originals together. No N+1. Media URLs are built from the rows only (no file
+     * access), so a missing file never breaks a list.
      */
     @Transactional(readOnly = true)
     public List<PostView> views(List<Post> posts, UUID viewerId) {
@@ -173,6 +201,11 @@ public class PostService {
         var avatars = getAuthorAvatarUrls(all.stream().map(Post::getAuthorId).collect(Collectors.toSet()));
         var hashtags = hashtagRepository.findByPostIds(ids);
         var mentions = mentionRepository.findByPostIds(ids);
+        Map<UUID, List<MediaView>> media = new HashMap<>();
+        for (var m : mediaRepository.findByPostIds(ids)) {
+            media.computeIfAbsent(m.getPostId(), k -> new ArrayList<>())
+                    .add(new MediaView(m.getId(), mediaStorage.publicUrl(m.getStorageKey()), m.getWidth(), m.getHeight()));
+        }
         Map<UUID, long[]> counts = new HashMap<>(); // [reposts, quotes]
         for (Object[] row : postRepository.countRepostsAndQuotes(ids)) {
             var c = counts.computeIfAbsent((UUID) row[0], k -> new long[2]);
@@ -197,7 +230,8 @@ public class PostService {
             return new PostView(p, avatars.get(p.getAuthorId()),
                     hashtags.getOrDefault(p.getId(), List.of()),
                     mentions.getOrDefault(p.getId(), List.of()),
-                    c[0], c[1], reposted.contains(p.getId()), bookmarked.contains(p.getId()), reactions.get(p.getId()), original);
+                    c[0], c[1], reposted.contains(p.getId()), bookmarked.contains(p.getId()), reactions.get(p.getId()), original,
+                    media.getOrDefault(p.getId(), List.of()));
         };
         return posts.stream().map(p -> {
             var original = p.embedsOriginal() ? byId.get(p.getOriginalPostId()) : null;
@@ -328,6 +362,68 @@ public class PostService {
             commentReactionRepository.save(CommentReaction.of(commentId, userId, change.added()));
         }
         return commentRepository.save(comment);
+    }
+
+    // ── Media ──────────────────────────────────────────────────────────────────
+
+    /** At most {@link PostMedia#MAX_PER_POST} ids, no null, no duplicates (400 otherwise). */
+    private static List<UUID> validateMediaIds(List<UUID> mediaIds) {
+        if (mediaIds == null || mediaIds.isEmpty()) return List.of();
+        if (mediaIds.size() > PostMedia.MAX_PER_POST) {
+            throw new IllegalArgumentException("A post can have at most " + PostMedia.MAX_PER_POST + " images");
+        }
+        if (mediaIds.stream().anyMatch(Objects::isNull)) throw new IllegalArgumentException("mediaIds must not contain null");
+        if (new HashSet<>(mediaIds).size() != mediaIds.size()) {
+            throw new IllegalArgumentException("mediaIds must not contain duplicates");
+        }
+        return List.copyOf(mediaIds);
+    }
+
+    /**
+     * Locks the requested uploads (one SELECT ... FOR UPDATE, id order) and checks each is an unattached upload of
+     * {@code requesterId}: unknown or someone else's -> 404 (same answer, nothing leaks), already attached -> 400. The
+     * lock makes a concurrent second attach of the same upload wait and then fail with 400; the cleanup job skips
+     * locked rows. Returns the uploads in the requested order.
+     */
+    private List<PostMedia> lockAttachable(List<UUID> mediaIds, UUID requesterId) {
+        var ids = validateMediaIds(mediaIds);
+        if (ids.isEmpty()) return List.of();
+        Map<UUID, PostMedia> byId = new HashMap<>();
+        mediaRepository.findAllByIdForUpdate(ids).forEach(m -> byId.put(m.getId(), m));
+        List<PostMedia> ordered = new ArrayList<>(ids.size());
+        for (UUID id : ids) {
+            var media = byId.get(id);
+            if (media == null) throw PostMedia.notFound(id);
+            media.ensureAttachableBy(requesterId);
+            ordered.add(media);
+        }
+        return ordered;
+    }
+
+    /** Attaches the locked uploads to the saved (flushed) post, positions in request order. */
+    private Post attach(Post post, List<PostMedia> media, UUID requesterId) {
+        if (media.isEmpty()) return post;
+        for (int i = 0; i < media.size(); i++) media.get(i).attachTo(post.getId(), i, requesterId);
+        mediaRepository.flush();
+        return post;
+    }
+
+    /**
+     * Deletes the files once the transaction committed (a rollback keeps them); best effort, never fails the caller
+     * ({@link MediaStorage#delete} logs and swallows errors). Without a transaction (unit tests) it deletes at once.
+     */
+    private void deleteFilesAfterCommit(List<String> keys) {
+        if (keys.isEmpty()) return;
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            keys.forEach(mediaStorage::delete);
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                keys.forEach(mediaStorage::delete);
+            }
+        });
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────

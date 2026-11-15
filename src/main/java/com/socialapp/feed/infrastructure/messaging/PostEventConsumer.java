@@ -18,7 +18,7 @@ import org.springframework.stereotype.Component;
  * Consumes PostCreatedEvents (posts, reposts, quotes) from Kafka and fans out to SSE subscribers.
  * Avatar is resolved from author_profiles so it is always current; the type, the embedded original
  * (built by {@link PostService#views} without a viewer, so no N+1 and the same shape as REST), hashtags and
- * mentions are read from Feed's own tables (committed together with the post, before the event left the outbox).
+ * mentions and media are read from Feed's own tables (committed together with the post, before the event left the outbox).
  * A post deleted before its event is consumed is still broadcast from the event's own fields (type from the
  * event; no original, tags or mentions).
  */
@@ -62,7 +62,8 @@ public class PostEventConsumer {
                 view.map(v -> v.mentions()).orElse(null),
                 post.map(p -> p.getType()).orElseGet(() -> typeOf(event)),
                 original == null ? null : original.authorId(),
-                original
+                original,
+                view.map(v -> v.media()).orElse(null)
         ));
     }
 

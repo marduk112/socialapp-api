@@ -70,6 +70,7 @@ class NotificationIntegrationTest {
         registry.add("spring.neo4j.authentication.password", () -> "testpassword");
         registry.add("spring.kafka.bootstrap-servers", kafka::getBootstrapServers);
         registry.add("server.address", () -> "127.0.0.1"); // see SocialAppIntegrationTest
+        registry.add("app.media.cleanup-enabled", () -> "false"); // scheduled media purge off in tests
     }
 
     private static final Duration WAIT = Duration.ofSeconds(30);

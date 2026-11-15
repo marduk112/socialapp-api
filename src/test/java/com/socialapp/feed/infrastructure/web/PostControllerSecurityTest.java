@@ -65,6 +65,8 @@ class PostControllerSecurityTest {
     @MockitoBean PostMentionRepository postMentionRepository;
     @MockitoBean BookmarkRepository bookmarkRepository;
     @MockitoBean FeedSseService feedSseService;
+    @MockitoBean PostMediaRepository postMediaRepository;
+    @MockitoBean com.socialapp.feed.application.media.MediaStorage mediaStorage;
 
     private String bearer(UUID userId, String username) {
         return "Bearer " + jwtService.issueToken(userId, username);
@@ -809,5 +811,96 @@ class PostControllerSecurityTest {
         // File does not exist -> 404, but crucially not 401
         mvc.perform(get("/uploads/avatars/does-not-exist.png"))
                 .andExpect(status().isNotFound());
+    }
+
+    // ── Images (3C): mediaIds on create/quote, media on every PostResponse ───
+
+    @Test
+    void createWithMediaAttachesTheCallersUploadsInOrder_andReturnsThemAsMedia() throws Exception {
+        when(postRepository.save(any(Post.class))).thenAnswer(inv -> inv.getArgument(0));
+        var first = PostMedia.upload(ALICE, ImageFormat.PNG, 10, 20, 100);
+        var second = PostMedia.upload(ALICE, ImageFormat.JPEG, 30, 40, 100);
+        when(postMediaRepository.findAllByIdForUpdate(any())).thenReturn(List.of(first, second));
+        when(postMediaRepository.findByPostIds(any())).thenAnswer(inv -> List.of(second, first).stream()
+                .filter(PostMedia::isAttached).sorted(java.util.Comparator.comparing(PostMedia::getPosition)).toList());
+        when(mediaStorage.publicUrl(any())).thenAnswer(inv -> "http://h/uploads/media/" + inv.getArgument(0));
+
+        mvc.perform(post("/api/v1/posts").header(HttpHeaders.AUTHORIZATION, bearer(ALICE, "alice"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"content\":\"pics\",\"mediaIds\":[\"" + second.getId() + "\",\"" + first.getId() + "\"]}"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.media.length()", is(2)))
+                .andExpect(jsonPath("$.media[0].id", is(second.getId().toString())))
+                .andExpect(jsonPath("$.media[0].url", is("http://h/uploads/media/" + second.getStorageKey())))
+                .andExpect(jsonPath("$.media[0].width", is(30)))
+                .andExpect(jsonPath("$.media[0].height", is(40)))
+                .andExpect(jsonPath("$.media[1].id", is(first.getId().toString())));
+
+        assertThat(second.getPosition()).isEqualTo((short) 0);
+        assertThat(first.getPosition()).isEqualTo((short) 1);
+        assertThat(first.getPostId()).isEqualTo(second.getPostId()).isNotNull();
+    }
+
+    @Test
+    void postWithoutMediaHasAnEmptyMediaArray() throws Exception {
+        var post = Post.create(ALICE, "alice", "plain", null);
+        when(postRepository.findById(post.getId())).thenReturn(Optional.of(post));
+
+        mvc.perform(get("/api/v1/posts/{id}", post.getId()).header(HttpHeaders.AUTHORIZATION, bearer(BOB, "bob")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.media").isArray())
+                .andExpect(jsonPath("$.media.length()", is(0)));
+    }
+
+    @Test
+    void someoneElsesUploadIs404_alreadyAttachedIs400_andNothingIsSaved() throws Exception {
+        var bobs = PostMedia.upload(BOB, ImageFormat.PNG, 1, 1, 1);
+        var attached = PostMedia.upload(ALICE, ImageFormat.PNG, 1, 1, 1);
+        attached.attachTo(UUID.randomUUID(), 0, ALICE);
+        when(postMediaRepository.findAllByIdForUpdate(List.of(bobs.getId()))).thenReturn(List.of(bobs));
+        when(postMediaRepository.findAllByIdForUpdate(List.of(attached.getId()))).thenReturn(List.of(attached));
+
+        mvc.perform(post("/api/v1/posts").header(HttpHeaders.AUTHORIZATION, bearer(ALICE, "alice"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"content\":\"x\",\"mediaIds\":[\"" + bobs.getId() + "\"]}"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error", is("Media not found: " + bobs.getId())));
+        mvc.perform(post("/api/v1/posts").header(HttpHeaders.AUTHORIZATION, bearer(ALICE, "alice"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"content\":\"x\",\"mediaIds\":[\"" + UUID.randomUUID() + "\"]}"))
+                .andExpect(status().isNotFound());
+        mvc.perform(post("/api/v1/posts").header(HttpHeaders.AUTHORIZATION, bearer(ALICE, "alice"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"content\":\"x\",\"mediaIds\":[\"" + attached.getId() + "\"]}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error", is("Media is already attached to a post: " + attached.getId())));
+        verify(postRepository, never()).save(any());
+    }
+
+    @Test
+    void moreThanFourOrDuplicateOrMalformedMediaIdsAre400_andMediaOnlyPostsAreNotAllowed() throws Exception {
+        var ids = new StringBuilder();
+        for (int i = 0; i < 5; i++) ids.append(i == 0 ? "" : ",").append('"').append(UUID.randomUUID()).append('"');
+        var dup = UUID.randomUUID();
+        for (String body : List.of(
+                "{\"content\":\"x\",\"mediaIds\":[" + ids + "]}",
+                "{\"content\":\"x\",\"mediaIds\":[\"" + dup + "\",\"" + dup + "\"]}",
+                "{\"content\":\"x\",\"mediaIds\":[\"not-a-uuid\"]}",
+                "{\"content\":\"\",\"mediaIds\":[\"" + UUID.randomUUID() + "\"]}")) {
+            mvc.perform(post("/api/v1/posts").header(HttpHeaders.AUTHORIZATION, bearer(ALICE, "alice"))
+                            .contentType(MediaType.APPLICATION_JSON).content(body))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.error").exists());
+        }
+        var original = Post.create(BOB, "bob", "orig", null);
+        when(postRepository.findById(original.getId())).thenReturn(Optional.of(original));
+        when(postRepository.findByIdForUpdate(original.getId())).thenReturn(Optional.of(original));
+        mvc.perform(post("/api/v1/posts/{id}/quote", original.getId())
+                        .header(HttpHeaders.AUTHORIZATION, bearer(ALICE, "alice"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"comment\":\"q\",\"mediaIds\":[" + ids + "]}"))
+                .andExpect(status().isBadRequest());
+        verify(postRepository, never()).save(any());
+        verifyNoInteractions(postMediaRepository);
     }
 }

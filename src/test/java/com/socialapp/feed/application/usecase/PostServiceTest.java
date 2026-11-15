@@ -29,8 +29,11 @@ class PostServiceTest {
     private final PostHashtagRepository hashtags = mock(PostHashtagRepository.class);
     private final PostMentionRepository mentions = mock(PostMentionRepository.class);
     private final BookmarkRepository bookmarks = mock(BookmarkRepository.class);
+    private final PostMediaRepository media = mock(PostMediaRepository.class);
+    private final com.socialapp.feed.application.media.MediaStorage storage =
+            mock(com.socialapp.feed.application.media.MediaStorage.class);
     private final PostService service = new PostService(posts, reactions, comments, commentReactions, profiles,
-            hashtags, mentions, bookmarks);
+            hashtags, mentions, bookmarks, media, storage);
 
     @BeforeEach
     void saveReturnsArgument() {

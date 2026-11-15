@@ -1,5 +1,6 @@
 package com.socialapp.feed.infrastructure.web;
 
+import com.socialapp.feed.application.media.MediaView;
 import com.socialapp.feed.application.usecase.PostView;
 import com.socialapp.feed.domain.Mention;
 import com.socialapp.feed.domain.Post;
@@ -27,6 +28,8 @@ import java.util.UUID;
  *   <li>{@code originalPostId}, {@code originalAuthorUsername}, {@code originalContent}: legacy flat fields kept
  *       for compatibility (snapshot taken when the repost/quote was created); {@code originalAuthorId} is the
  *       current original's author (null when it is gone).</li>
+ *   <li>{@code media}: the post's own images {@code [{id, url, width, height}]} ordered by position, {@code []} when
+ *       none (always for a REPOST: its original's images are in {@code original.media}). Stage 3C, appended last.</li>
  * </ul>
  */
 public record PostResponse(
@@ -39,7 +42,8 @@ public record PostResponse(
         PostType type, UUID originalAuthorId,
         long repostsCount, long quotesCount, boolean viewerReposted, boolean bookmarked,
         ReactionEvent.ReactionType userReaction,
-        PostResponse original
+        PostResponse original,
+        List<MediaView> media
 ) {
     public static PostResponse from(PostView view) {
         if (view == null) return null;
@@ -55,7 +59,8 @@ public record PostResponse(
                 p.getType(), original == null ? null : original.authorId(),
                 view.repostsCount(), view.quotesCount(), view.viewerReposted(), view.bookmarked(),
                 view.userReaction(),
-                original
+                original,
+                view.media()
         );
     }
 }

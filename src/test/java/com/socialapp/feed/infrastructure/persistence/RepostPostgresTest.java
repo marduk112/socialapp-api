@@ -52,7 +52,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @Testcontainers(disabledWithoutDocker = true)
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 @Import({PostService.class, TimelineService.class, JdbcPostHashtagRepository.class, JdbcPostMentionRepository.class,
-        RepostPostgresTest.StatementCounting.class})
+        RepostPostgresTest.StatementCounting.class, com.socialapp.feed.infrastructure.media.MediaAdapters.class})
 class RepostPostgresTest {
 
     @Container
@@ -329,9 +329,10 @@ class RepostPostgresTest {
         int large = statementsFor(page, viewer);
 
         assertThat(large).isEqualTo(small);
-        // at most: 2 original levels + avatars + hashtags + mentions + counts + viewer reposts + viewer reactions;
-        // here the quoted posts are already loaded at level 1 (they are reposted directly too), so 8 (+ the viewer bookmarks)
-        assertThat(small).isBetween(8, 9);
+        // at most: 2 original levels + avatars + hashtags + mentions + media + counts + viewer reposts + viewer
+        // bookmarks + viewer reactions; here the quoted posts are already loaded at level 1 (they are reposted directly
+        // too), so 9 (+ the second original level when it is needed)
+        assertThat(small).isBetween(9, 10);
     }
 
     private int statementsFor(List<Post> page, UUID viewer) {

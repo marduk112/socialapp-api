@@ -37,7 +37,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @Testcontainers(disabledWithoutDocker = true)
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 @Import({PostService.class, TimelineService.class, BookmarkService.class, JdbcPostHashtagRepository.class,
-        JdbcPostMentionRepository.class})
+        JdbcPostMentionRepository.class, com.socialapp.feed.infrastructure.media.MediaAdapters.class})
 class BookmarkPostgresTest {
 
     @Container

@@ -1,8 +1,11 @@
 spring:
   servlet:
+    # Global multipart limits = the largest upload any endpoint accepts (post images, app.media.max-bytes: 5 MB; a
+    # bit of headroom on the request for the multipart envelope). Endpoints enforce their own lower limits: the avatar
+    # upload keeps its 2 MB check (AvatarController). Above these limits -> 413 JSON (GlobalExceptionHandler).
     multipart:
-      max-file-size: 2MB
-      max-request-size: 2MB
+      max-file-size: 5MB
+      max-request-size: 6MB
   application:
     name: social-app
 
@@ -66,7 +69,16 @@ server:
 app:
   base-url: http://localhost:8080
   upload:
-    dir: ./uploads/avatars
+    dir: ./uploads/avatars         # avatars, served under /uploads/avatars/**
+  # Images in posts (stage 3C, Feed). Files on local disk behind the MediaStorage port, served under /uploads/media/**.
+  media:
+    dir: ./uploads/media           # LocalDiskMediaStorage directory (git-ignored: uploads/)
+    max-bytes: 5242880             # 5 MB per image (413 above); keep <= spring.servlet.multipart.max-file-size
+    max-pending-per-user: 20       # unattached uploads per user (429 above)
+    unattached-ttl: 24h            # unattached uploads older than this are deleted (row + file)
+    cleanup-enabled: true          # schedule the purge (MediaCleanupJob); false: only when invoked directly
+    cleanup-interval-ms: 3600000   # purge period (also the delay of the first run)
+    cleanup-batch-size: 500        # rows per purge transaction
   jwt:
     # HS256 signing key, must be >= 32 bytes. Override in every non-dev environment
     # with the APP_JWT_SECRET env var. The default below is for local development ONLY.

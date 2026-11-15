@@ -1,5 +1,6 @@
 package com.socialapp.feed.application.usecase;
 
+import com.socialapp.feed.application.media.MediaView;
 import com.socialapp.feed.domain.Mention;
 import com.socialapp.feed.domain.Post;
 import com.socialapp.shared.events.ReactionEvent;
@@ -17,12 +18,15 @@ import java.util.List;
  * @param original       for a REPOST/QUOTE: the embedded original, or null when it was deleted; null for a POST.
  *                       One level only (its own {@code original} is null), except a REPOST of a QUOTE, whose
  *                       original (the quote) carries the quoted post as a second level (whose original is null).
+ * @param media          the post's own images ordered by position (a REPOST has none; its original's are in
+ *                       {@code original}); never null
  */
 public record PostView(Post post, String authorAvatarUrl, List<String> hashtags, List<Mention> mentions,
                        long repostsCount, long quotesCount, boolean viewerReposted, boolean bookmarked,
-                       ReactionEvent.ReactionType userReaction, PostView original) {
+                       ReactionEvent.ReactionType userReaction, PostView original, List<MediaView> media) {
     public PostView {
         hashtags = List.copyOf(hashtags);
         mentions = List.copyOf(mentions);
+        media = media == null ? List.of() : List.copyOf(media);
     }
 }
