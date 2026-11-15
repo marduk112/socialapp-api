@@ -28,10 +28,10 @@ com.socialapp
 │       ├── outbox/     SocialOutboxStore, SocialOutboxForwarder (Neo4j outbox -> Postgres outbox)
 │       └── backfill/   FollowProjectionBackfill, FollowBackfillStore (pre-2A follows -> social-events)
 └── feed/
-    ├── domain/       Post, PostType, Comment, PostReaction, Follow (+ repositories), HashtagParser, MentionParser,
+    ├── domain/       Post, PostType, Comment, PostReaction, Follow, Bookmark (+ repositories), HashtagParser, MentionParser,
     │                 Mention, PostHashtagRepository / PostMentionRepository (ports)
     ├── application/  usecase/  PostService, PostView, AuthorProfileProjection, FollowProjection,
-    │                           MentionLookup, PostTextIndexBackfill (pre-2B hashtags/mentions)
+    │                           MentionLookup, PostTextIndexBackfill (pre-2B hashtags/mentions), BookmarkService (3B)
     │                 timeline/ TimelineService, FeedCursor, FeedScope, FeedPage, FolloweeLookup
     └── infrastructure/
         ├── web/      PostController, PostResponse (REST + SSE `original` shape), MaxCodePoints
@@ -232,6 +232,8 @@ Current migrations:
 - `V20__notifications.sql` — Notification BC: `notifications` (dedupe key `ux_notifications_key (recipient_id, type,
   actor_id, target_id)`, tombstone `retracted`, `last_event_at`, CHECKs type / not-self, partial indexes for the page
   and the unread count), `notification_actor_profiles`, `notification_cutoff` (one row: migration time). No FKs.
+- `V21__bookmarks.sql` — `bookmarks (user_id, post_id FK posts ON DELETE CASCADE, created_at; PK (user_id, post_id))`, index
+  `ix_bookmarks_user_created_post (user_id, created_at DESC, post_id DESC)` (see "Bookmarks")
 
 **Always create a new numbered migration file. Never modify existing ones.**
 
@@ -364,6 +366,24 @@ is gone: REPOSTs deleted, QUOTEs kept with original/snapshot NULL; several REPOS
 the oldest `(created_at, id)` is kept, the others deleted (with their comments/reactions); `image_url` of REPOSTs and
 QUOTEs cleared (a share only ever copied the original's image). Tested in `V18BackfillMigrationTest`.
 
+## Bookmarks (stage 3B)
+
+Private "saved posts" in Feed (Postgres/JPA); no Kafka events, no other BC involved.
+- `PUT /posts/{id}/bookmark` -> 204, idempotent (`INSERT ... SELECT FROM posts ... ON CONFLICT DO NOTHING`, race-safe);
+  unknown/deleted post -> 404. `DELETE /posts/{id}/bookmark` -> 204 always. A repost item is bookmarked as given (its own
+  id, not its original). Everything is scoped by the caller's id from the token; there is no way to address another
+  user's bookmarks.
+- `GET /bookmarks?cursor=&size=` -> same `{items, nextCursor}` envelope and `PostResponse` as `/feed` (embedded originals,
+  counters, viewer flags). Keyset over `(bookmarks.created_at DESC, post_id DESC)`; the cursor is a `FeedCursor` holding the
+  BOOKMARK time. Size default 20, clamp 100, `< 1` or a malformed cursor -> 400. Two queries (bookmarks, their posts); a post
+  missing in between is skipped. Re-bookmarking keeps the original position.
+- `V21` FK `ON DELETE CASCADE`: deleting a post (also a repost deleted with its original) removes everybody's bookmarks of it.
+  `user_id` has no FK (other BC).
+- `PostResponse.bookmarked` (all Post DTOs, nested originals included): the viewer bookmarked THAT item; ONE batch query
+  (`BookmarkRepository.findBookmarkedPostIds`) in `PostService.views`. SSE broadcasts are viewer-agnostic: the embedded
+  `original` has `bookmarked=false` and the payload carries no flag (clients treat live posts as not bookmarked).
+- Tests: `BookmarkServiceTest`, `BookmarkControllerTest` (web), `BookmarkPostgresTest`, `BookmarkIntegrationTest`.
+
 ## SSE (Server-Sent Events)
 
 `GET /api/v1/feed/stream?access_token=...&scope=all|following` (default `all`).
@@ -454,6 +474,7 @@ Config: `app.jwt.secret` (env `APP_JWT_SECRET`, >= 32 bytes) and `app.jwt.expira
   graceful shutdown does not hit a blocked acceptor on sandboxed machines.
 - `NotificationIntegrationTest` (same container/context lifecycle): follow/like/unlike/comment/reply/mention/repost/quote
   over HTTP -> outbox -> Kafka -> Notification -> REST + SSE (isolation between users), and the enriched outbox rows.
+- `BookmarkIntegrationTest` (same lifecycle): bookmark/list/page/flag/isolation/cascade over HTTP.
 - Kafka error handling is tested end to end for both a malformed record (DeserializationException -> DLT at once) and a
   record that deserializes but keeps failing in the listener (3 attempts, then `<topic>.DLT` with `kafka_dlt-*` headers;
   later records of the same partition still processed).

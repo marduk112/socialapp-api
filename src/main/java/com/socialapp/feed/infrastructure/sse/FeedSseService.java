@@ -57,7 +57,8 @@ public class FeedSseService {
      * SSE payload sent to frontend — avatar comes from author_profiles, not from the post. Field names of the
      * pre-2C fields are unchanged ({@code postId}, not {@code id}). {@code type}, {@code originalAuthorId} and
      * {@code original} (a {@link PostResponse}, same shape and nesting rules as in REST, built from the database at
-     * broadcast time; viewer-specific fields are {@code viewerReposted = false}, {@code userReaction = null}) were
+     * broadcast time; viewer-specific fields are {@code viewerReposted = false}, {@code bookmarked = false}, {@code userReaction = null}; the
+     * payload itself has no viewer flags, a broadcast is viewer-agnostic: clients treat a live post as not bookmarked) were
      * added in stage 2C.
      */
     public record PostSsePayload(

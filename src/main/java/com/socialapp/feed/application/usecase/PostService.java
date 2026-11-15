@@ -22,6 +22,7 @@ public class PostService {
     private final AuthorProfileRepository authorProfileRepository;
     private final PostHashtagRepository hashtagRepository;
     private final PostMentionRepository mentionRepository;
+    private final BookmarkRepository bookmarkRepository;
 
     // ── Posts CRUD ──────────────────────────────────────────────────────────────
 
@@ -142,12 +143,12 @@ public class PostService {
 
     /**
      * The posts as seen by {@code viewerId} (null = nobody, e.g. an SSE broadcast), in the given order, with
-     * author avatar, hashtags, mentions, repost/quote counters, the viewer's repost flag and reaction, and the
+     * author avatar, hashtags, mentions, repost/quote counters, the viewer's repost flag, bookmark flag and reaction, and the
      * embedded original of reposts/quotes (see {@link PostView#original()}).
      *
      * <p>Constant number of queries regardless of the number of posts: at most two for the originals (the
      * embedded originals, then the quoted posts of reposted quotes), then one IN query each for avatars,
-     * hashtags, mentions, repost/quote counts and - with a viewer - reposted flags and reactions, all covering the
+     * hashtags, mentions, repost/quote counts and - with a viewer - reposted flags, bookmarks and reactions, all covering the
      * page posts and their originals together. No N+1.
      */
     @Transactional(readOnly = true)
@@ -181,6 +182,8 @@ public class PostService {
         }
         Set<UUID> reposted = viewerId == null ? Set.of()
                 : new HashSet<>(postRepository.findRepostedOriginalIds(viewerId, ids));
+        Set<UUID> bookmarked = viewerId == null ? Set.of()
+                : new HashSet<>(bookmarkRepository.findBookmarkedPostIds(viewerId, ids));
         Map<UUID, ReactionEvent.ReactionType> reactions = new HashMap<>();
         if (viewerId != null) {
             for (var r : reactionRepository.findByUserIdAndPostIdIn(viewerId, ids)) {
@@ -194,7 +197,7 @@ public class PostService {
             return new PostView(p, avatars.get(p.getAuthorId()),
                     hashtags.getOrDefault(p.getId(), List.of()),
                     mentions.getOrDefault(p.getId(), List.of()),
-                    c[0], c[1], reposted.contains(p.getId()), reactions.get(p.getId()), original);
+                    c[0], c[1], reposted.contains(p.getId()), bookmarked.contains(p.getId()), reactions.get(p.getId()), original);
         };
         return posts.stream().map(p -> {
             var original = p.embedsOriginal() ? byId.get(p.getOriginalPostId()) : null;

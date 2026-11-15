@@ -5,6 +5,7 @@ import com.socialapp.config.security.SecurityConfig;
 import com.socialapp.feed.application.timeline.FeedCursor;
 import com.socialapp.feed.application.timeline.FeedScope;
 import com.socialapp.feed.application.timeline.TimelineService;
+import com.socialapp.feed.application.usecase.BookmarkService;
 import com.socialapp.feed.application.usecase.PostService;
 import com.socialapp.feed.domain.*;
 import com.socialapp.feed.infrastructure.sse.FeedSseService;
@@ -44,7 +45,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * (HTTP -> controller -> service -> aggregate). No Docker/infra required.
  */
 @WebMvcTest(controllers = PostController.class)
-@Import({SecurityConfig.class, JwtService.class, PostService.class, TimelineService.class, ValidationConfig.class})
+@Import({SecurityConfig.class, JwtService.class, PostService.class, TimelineService.class, BookmarkService.class,
+        ValidationConfig.class})
 class PostControllerSecurityTest {
 
     private static final UUID ALICE = UUID.randomUUID();
@@ -61,6 +63,7 @@ class PostControllerSecurityTest {
     @MockitoBean AuthorProfileRepository authorProfileRepository;
     @MockitoBean PostHashtagRepository postHashtagRepository;
     @MockitoBean PostMentionRepository postMentionRepository;
+    @MockitoBean BookmarkRepository bookmarkRepository;
     @MockitoBean FeedSseService feedSseService;
 
     private String bearer(UUID userId, String username) {

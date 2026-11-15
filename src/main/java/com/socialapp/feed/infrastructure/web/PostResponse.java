@@ -18,8 +18,9 @@ import java.util.UUID;
  *   <li>{@code hashtags} / {@code mentions}: of the post's own text only (a quote's comment, never the original's
  *       text); always present, possibly empty.</li>
  *   <li>{@code repostsCount} / {@code quotesCount}: REPOST / QUOTE rows pointing at this post.</li>
- *   <li>{@code viewerReposted}: the caller has a REPOST of this post; {@code userReaction}: the caller's
- *       LIKE/DISLIKE or null. Both false/null where there is no caller (SSE broadcast).</li>
+ *   <li>{@code viewerReposted}: the caller has a REPOST of this post; {@code bookmarked}: the caller bookmarked this
+ *       post (the item itself, a repost item is bookmarked as such); {@code userReaction}: the caller's
+ *       LIKE/DISLIKE or null. All false/null where there is no caller (SSE broadcast).</li>
  *   <li>{@code original}: the full original of a REPOST/QUOTE (null for a POST, or when the original was
  *       deleted: "unavailable"). One level (its {@code original} is null), except a REPOST of a QUOTE: there the
  *       nested quote carries its quoted post (second level, whose {@code original} is null).</li>
@@ -36,7 +37,7 @@ public record PostResponse(
         Instant createdAt, Instant updatedAt,
         List<String> hashtags, List<Mention> mentions,
         PostType type, UUID originalAuthorId,
-        long repostsCount, long quotesCount, boolean viewerReposted,
+        long repostsCount, long quotesCount, boolean viewerReposted, boolean bookmarked,
         ReactionEvent.ReactionType userReaction,
         PostResponse original
 ) {
@@ -52,7 +53,7 @@ public record PostResponse(
                 p.getCreatedAt(), p.getUpdatedAt(),
                 view.hashtags(), view.mentions(),
                 p.getType(), original == null ? null : original.authorId(),
-                view.repostsCount(), view.quotesCount(), view.viewerReposted(),
+                view.repostsCount(), view.quotesCount(), view.viewerReposted(), view.bookmarked(),
                 view.userReaction(),
                 original
         );

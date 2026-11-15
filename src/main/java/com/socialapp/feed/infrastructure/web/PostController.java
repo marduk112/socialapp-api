@@ -4,6 +4,7 @@ import com.socialapp.feed.application.timeline.FeedCursor;
 import com.socialapp.feed.application.timeline.FeedScope;
 import com.socialapp.feed.application.timeline.TimelineService;
 import com.socialapp.feed.application.timeline.FeedPage;
+import com.socialapp.feed.application.usecase.BookmarkService;
 import com.socialapp.feed.application.usecase.PostService;
 import com.socialapp.feed.application.usecase.PostView;
 import com.socialapp.feed.domain.Comment;
@@ -34,6 +35,7 @@ import java.util.stream.Collectors;
 public class PostController {
 
     private final PostService postService;
+    private final BookmarkService bookmarkService;
     private final TimelineService timelineService;
     private final FeedSseService feedSseService;
 
@@ -164,6 +166,37 @@ public class PostController {
     private ResponseEntity<PostResponse> repostResponse(PostService.RepostResult result, AuthenticatedUser me) {
         return ResponseEntity.status(result.created() ? HttpStatus.CREATED : HttpStatus.OK)
                 .body(enriched(result.post(), me));
+    }
+
+    // ── Bookmarks ─────────────────────────────────────────────────────────────
+
+    /**
+     * Bookmarks post {@code id} for the caller (private). 204, idempotent; unknown/deleted post -> 404. Bookmarking a
+     * repost item bookmarks that item (its own id), not the original.
+     */
+    @PutMapping("/posts/{id}/bookmark")
+    public ResponseEntity<Void> bookmark(@PathVariable UUID id, @AuthenticationPrincipal AuthenticatedUser me) {
+        bookmarkService.bookmark(me.id(), id);
+        return ResponseEntity.noContent().build();
+    }
+
+    /** Removes the caller's bookmark of post {@code id}. Always 204 (also when there was none or the post is gone). */
+    @DeleteMapping("/posts/{id}/bookmark")
+    public ResponseEntity<Void> unbookmark(@PathVariable UUID id, @AuthenticationPrincipal AuthenticatedUser me) {
+        bookmarkService.unbookmark(me.id(), id);
+        return ResponseEntity.noContent().build();
+    }
+
+    /**
+     * The caller's bookmarks, most recently bookmarked first: same envelope, {@code PostResponse} items, cursor and size
+     * rules as {@code /feed} (keyset over bookmark time and post id; malformed cursor or size &lt; 1 -> 400).
+     */
+    @GetMapping("/bookmarks")
+    public ResponseEntity<FeedPageResponse> getBookmarks(
+            @AuthenticationPrincipal AuthenticatedUser me,
+            @RequestParam(required = false) String cursor,
+            @RequestParam(defaultValue = "" + TimelineService.DEFAULT_SIZE) int size) {
+        return ResponseEntity.ok(pageResponse(bookmarkService.page(me.id(), FeedCursor.decode(cursor), size), me));
     }
 
     // ── Reactions ─────────────────────────────────────────────────────────────

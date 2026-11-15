@@ -330,8 +330,8 @@ class RepostPostgresTest {
 
         assertThat(large).isEqualTo(small);
         // at most: 2 original levels + avatars + hashtags + mentions + counts + viewer reposts + viewer reactions;
-        // here the quoted posts are already loaded at level 1 (they are reposted directly too), so 7
-        assertThat(small).isBetween(7, 8);
+        // here the quoted posts are already loaded at level 1 (they are reposted directly too), so 8 (+ the viewer bookmarks)
+        assertThat(small).isBetween(8, 9);
     }
 
     private int statementsFor(List<Post> page, UUID viewer) {

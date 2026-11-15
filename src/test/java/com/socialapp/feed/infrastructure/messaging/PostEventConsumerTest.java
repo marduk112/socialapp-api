@@ -31,7 +31,8 @@ class PostEventConsumerTest {
     private final PostHashtagRepository hashtags = mock(PostHashtagRepository.class);
     private final PostMentionRepository mentions = mock(PostMentionRepository.class);
     private final PostService postService = new PostService(posts, reactions, mock(CommentRepository.class),
-            mock(CommentReactionRepository.class), profiles, hashtags, mentions);
+            mock(CommentReactionRepository.class), profiles, hashtags, mentions,
+            mock(BookmarkRepository.class));
     private final PostEventConsumer consumer = new PostEventConsumer(sse, profiles, posts, postService);
 
     private FeedSseService.PostSsePayload broadcastOf(PostCreatedEvent event) {

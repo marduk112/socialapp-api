@@ -28,8 +28,9 @@ class PostServiceTest {
     private final AuthorProfileRepository profiles = mock(AuthorProfileRepository.class);
     private final PostHashtagRepository hashtags = mock(PostHashtagRepository.class);
     private final PostMentionRepository mentions = mock(PostMentionRepository.class);
+    private final BookmarkRepository bookmarks = mock(BookmarkRepository.class);
     private final PostService service = new PostService(posts, reactions, comments, commentReactions, profiles,
-            hashtags, mentions);
+            hashtags, mentions, bookmarks);
 
     @BeforeEach
     void saveReturnsArgument() {
