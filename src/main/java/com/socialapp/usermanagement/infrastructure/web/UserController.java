@@ -7,6 +7,7 @@ import com.socialapp.shared.domain.ForbiddenOperationException;
 import com.socialapp.shared.security.AuthenticatedUser;
 import com.socialapp.usermanagement.domain.User;
 import com.socialapp.usermanagement.infrastructure.security.JwtService;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
@@ -57,16 +58,18 @@ public class UserController {
         return ResponseEntity.ok(withToken(user));
     }
 
+    /** Public profile. The e-mail address is private: it is only included when the caller asks for their own account. */
     @GetMapping("/{id}")
-    public ResponseEntity<UserResponse> getUser(@PathVariable UUID id) {
+    public ResponseEntity<UserResponse> getUser(@PathVariable UUID id, @AuthenticationPrincipal AuthenticatedUser me) {
         var user = userService.findById(id);
-        return ResponseEntity.ok(UserResponse.from(user));
+        return ResponseEntity.ok(UserResponse.from(user, me));
     }
 
     @GetMapping(params = "username")
-    public ResponseEntity<UserResponse> getUserByUsername(@RequestParam String username) {
+    public ResponseEntity<UserResponse> getUserByUsername(@RequestParam String username,
+                                                          @AuthenticationPrincipal AuthenticatedUser me) {
         var user = userService.findByUsername(username);
-        return ResponseEntity.ok(UserResponse.from(user));
+        return ResponseEntity.ok(UserResponse.from(user, me));
     }
 
     // ── Inner records (DTOs stay close to controller) ──────────────────────
@@ -87,9 +90,12 @@ public class UserController {
         return AuthResponse.from(user, jwtService.issueToken(user.getId(), user.getUsername()));
     }
 
-    record UserResponse(UUID id, String username, String email, String bio, String avatarUrl) {
-        static UserResponse from(User u) {
-            return new UserResponse(u.getId(), u.getUsername(), u.getEmail(), u.getBio(), u.getAvatarUrl());
+    /** {@code email} is omitted (not null) for everybody but the account owner. */
+    record UserResponse(UUID id, String username, @JsonInclude(JsonInclude.Include.NON_NULL) String email, String bio,
+                        String avatarUrl) {
+        static UserResponse from(User u, AuthenticatedUser viewer) {
+            boolean self = viewer != null && viewer.id().equals(u.getId());
+            return new UserResponse(u.getId(), u.getUsername(), self ? u.getEmail() : null, u.getBio(), u.getAvatarUrl());
         }
     }
 

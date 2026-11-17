@@ -184,6 +184,31 @@ class UserControllerSecurityTest {
     }
 
     @Test
+    void emailIsOnlyReturnedToTheAccountOwner() throws Exception {
+        var bob = User.register("bob", "bob@test.com", "hash", null);
+        when(userService.findById(alice.getId())).thenReturn(alice);
+        when(userService.findById(bob.getId())).thenReturn(bob);
+        when(userService.findByUsername("bob")).thenReturn(bob);
+
+        // own profile: the address is there
+        mvc.perform(get("/api/v1/users/{id}", alice.getId()).header(HttpHeaders.AUTHORIZATION, bearer(alice)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.email", is("alice@test.com")));
+
+        // somebody else's profile, by id and by username: no e-mail field at all, other fields intact
+        mvc.perform(get("/api/v1/users/{id}", bob.getId()).header(HttpHeaders.AUTHORIZATION, bearer(alice)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.username", is("bob")))
+                .andExpect(jsonPath("$.email").doesNotExist());
+        mvc.perform(get("/api/v1/users").param("username", "bob").header(HttpHeaders.AUTHORIZATION, bearer(alice)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.username", is("bob")))
+                .andExpect(jsonPath("$.email").doesNotExist());
+        mvc.perform(get("/api/v1/users").param("username", "bob").header(HttpHeaders.AUTHORIZATION, bearer(bob)))
+                .andExpect(jsonPath("$.email", is("bob@test.com")));
+    }
+
+    @Test
     void updatingAnotherUsersProfileIsForbidden() throws Exception {
         mvc.perform(put("/api/v1/users/{id}", bobId)
                         .header(HttpHeaders.AUTHORIZATION, bearer(alice))
