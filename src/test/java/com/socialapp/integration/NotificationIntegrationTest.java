@@ -96,6 +96,16 @@ class NotificationIntegrationTest {
         return http.send(builder.build(), HttpResponse.BodyHandlers.ofString());
     }
 
+    /**
+     * Follows, retrying while a user has not reached Neo4j yet: SocialGraph consumes user-events in its own consumer group, so right
+     * after registering the follow can answer 404 ("Follower not found") on a slow machine. Following is idempotent, so retrying
+     * cannot create a second notification.
+     */
+    private void follow(User follower, User followee) {
+        await().atMost(WAIT).ignoreExceptions().until(() ->
+                call("POST", "/social/follow", follower, Map.of("followeeId", followee.id())).statusCode() == 200);
+    }
+
     private JsonNode ok(HttpResponse<String> response, int status) throws Exception {
         assertThat(response.statusCode()).as(response.body()).isEqualTo(status);
         return response.body().isEmpty() ? null : JSON.readTree(response.body());
@@ -191,7 +201,7 @@ class NotificationIntegrationTest {
 
         try (var bobStream = new Stream(bob); var carolStream = new Stream(carol)) {
             // FOLLOW
-            ok(call("POST", "/social/follow", alice, Map.of("followeeId", bob.id())), 200);
+            follow(alice, bob);
             var follow = awaitNotification(bob, "FOLLOW", "actorId", alice.id().toString());
             assertThat(follow.get("actorUsername").asText()).isEqualTo("alice3a");
             assertThat(follow.get("postId").isNull()).isTrue();
@@ -258,7 +268,7 @@ class NotificationIntegrationTest {
             ok(call("POST", "/posts/" + bobsPost + "/repost", alice, null), 201);
 
             // carol's own notification (follow), to check isolation on both sides
-            ok(call("POST", "/social/follow", alice, Map.of("followeeId", carol.id())), 200);
+            follow(alice, carol);
             var carolsFollow = awaitNotification(carol, "FOLLOW", "actorId", alice.id().toString());
 
             // Live: bob's stream received every visible notification of his, with the REST shape; carol's only hers
