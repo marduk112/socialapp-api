@@ -13,7 +13,7 @@ import java.util.UUID;
 /**
  * User Aggregate Root — persisted in PostgreSQL.
  * Domain events are registered via AbstractAggregateRoot.registerEvent()
- * and published by Spring Data after repository.save() commits.
+ * and stored in the transactional outbox together with the change on repository.save().
  */
 @Entity
 @Table(name = "users")
@@ -48,6 +48,9 @@ public class User extends AggregateRoot<User> {
 
     // ── Factory method ──────────────────────────────────────────────────────
     public static User register(String username, String email, String passwordHash, String avatarUrl) {
+        requireText(username, "Username");
+        requireText(email, "Email");
+        email = normalizeEmail(email);
         var user = new User();
         user.id = UUID.randomUUID();
         user.username = username;
@@ -62,6 +65,17 @@ public class User extends AggregateRoot<User> {
         return user;
     }
 
+    /** E-mails are stored trimmed and lower-case so uniqueness and lookups are case-insensitive. */
+    public static String normalizeEmail(String email) {
+        return email == null ? null : email.trim().toLowerCase(java.util.Locale.ROOT);
+    }
+
+    private static void requireText(String value, String field) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException(field + " must not be blank");
+        }
+    }
+
     // ── Business methods ────────────────────────────────────────────────────
     public void updateAvatarUrl(String avatarUrl) {
         this.avatarUrl = avatarUrl;
@@ -70,6 +84,7 @@ public class User extends AggregateRoot<User> {
     }
 
     public void updateProfile(String username, String bio, String avatarUrl) {
+        requireText(username, "Username");
         this.username = username;
         this.bio = bio;
         this.avatarUrl = avatarUrl;

@@ -1,7 +1,12 @@
 package com.socialapp.socialgraph.infrastructure.messaging;
 
+import com.socialapp.shared.events.CommentCreatedEvent;
 import com.socialapp.shared.events.DomainEvent;
+import com.socialapp.shared.events.PostCreatedEvent;
+import com.socialapp.shared.events.ReactionEvent;
 import com.socialapp.shared.events.UserCreatedEvent;
+import com.socialapp.shared.events.UserFollowedEvent;
+import com.socialapp.shared.events.UserUnfollowedEvent;
 import com.socialapp.shared.events.UserUpdatedEvent;
 import com.socialapp.socialgraph.application.usecase.SocialGraphService;
 import lombok.RequiredArgsConstructor;
@@ -13,6 +18,9 @@ import org.springframework.stereotype.Component;
 /**
  * Kafka Consumer — SocialGraph listens to user-events topic.
  * No direct dependency on UserManagement module — purely event-driven.
+ *
+ * <p>One listener in one consumer group for the whole topic: a user's events share a key (and so a
+ * partition) and are therefore handled in publication order.
  */
 @Component
 @RequiredArgsConstructor
@@ -26,20 +34,21 @@ public class UserEventConsumer {
             groupId = "social-graph-group",
             containerFactory = "userEventListenerContainerFactory"
     )
-    public void onUserCreated(@Payload DomainEvent event) {
-        if (!(event instanceof UserCreatedEvent e)) return;
-        log.info("Received UserCreatedEvent for userId={}", e.userId());
-        socialGraphService.syncUserCreated(e);
-    }
-
-    @KafkaListener(
-            topics = "${kafka.topics.user-events}",
-            groupId = "social-graph-update-group",
-            containerFactory = "userUpdatedEventListenerContainerFactory"
-    )
-    public void onUserUpdated(@Payload DomainEvent event) {
-        if (!(event instanceof UserUpdatedEvent e)) return;
-        log.info("Received UserUpdatedEvent for userId={}", e.userId());
-        socialGraphService.syncUserUpdated(e);
+    public void onUserEvent(@Payload DomainEvent event) {
+        switch (event) {
+            case UserCreatedEvent e -> {
+                log.info("Received UserCreatedEvent for userId={}", e.userId());
+                socialGraphService.syncUserCreated(e);
+            }
+            case UserUpdatedEvent e -> {
+                log.info("Received UserUpdatedEvent for userId={}", e.userId());
+                socialGraphService.syncUserUpdated(e);
+            }
+            case PostCreatedEvent e -> log.warn("Unexpected PostCreatedEvent on user-events, ignoring: {}", e.eventId());
+            case ReactionEvent e -> log.warn("Unexpected ReactionEvent on user-events, ignoring: {}", e.eventId());
+            case CommentCreatedEvent e -> log.warn("Unexpected CommentCreatedEvent on user-events, ignoring: {}", e.eventId());
+            case UserFollowedEvent e -> log.warn("Unexpected UserFollowedEvent on user-events, ignoring: {}", e.eventId());
+            case UserUnfollowedEvent e -> log.warn("Unexpected UserUnfollowedEvent on user-events, ignoring: {}", e.eventId());
+        }
     }
 }

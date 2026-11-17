@@ -1,10 +1,13 @@
 package com.socialapp.usermanagement.infrastructure.web;
 
+import com.socialapp.shared.domain.ForbiddenOperationException;
+import com.socialapp.shared.security.AuthenticatedUser;
 import com.socialapp.usermanagement.application.usecase.UserService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -35,13 +38,18 @@ public class AvatarController {
     @PostMapping("/{id}/avatar")
     public ResponseEntity<AvatarResponse> upload(
             @PathVariable UUID id,
+            @AuthenticationPrincipal AuthenticatedUser me,
             @RequestParam("file") MultipartFile file) {
+
+        if (!me.id().equals(id)) {
+            throw new ForbiddenOperationException("You can only change your own avatar");
+        }
 
         if (file.isEmpty()) {
             return ResponseEntity.badRequest().build();
         }
         if (file.getSize() > MAX_BYTES) {
-            return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE).build();
+            return ResponseEntity.status(HttpStatus.CONTENT_TOO_LARGE).build();
         }
         String contentType = file.getContentType();
         if (contentType == null || !ALLOWED_TYPES.contains(contentType)) {

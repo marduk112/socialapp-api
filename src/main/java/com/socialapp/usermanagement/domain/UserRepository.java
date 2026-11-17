@@ -1,5 +1,6 @@
 package com.socialapp.usermanagement.domain;
 
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -14,4 +15,10 @@ public interface UserRepository {
     Optional<User> findByEmail(String email);
     boolean existsByEmail(String email);
     boolean existsByUsername(String username);
+
+    /**
+     * Users whose username contains {@code term} (case-insensitive, literal: LIKE wildcards in {@code term} are
+     * not special), best first: exact match, then prefix, then the rest by username; at most {@code limit}.
+     */
+    List<User> searchByUsername(String term, int limit);
 }

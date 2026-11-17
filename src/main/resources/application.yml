@@ -1,10 +1,32 @@
 spring:
   servlet:
+    # Global multipart limits = the largest upload any endpoint accepts (post images, app.media.max-bytes: 5 MB; a
+    # bit of headroom on the request for the multipart envelope). Endpoints enforce their own lower limits: the avatar
+    # upload keeps its 2 MB check (AvatarController). Above these limits -> 413 JSON (GlobalExceptionHandler).
     multipart:
-      max-file-size: 2MB
-      max-request-size: 2MB
+      max-file-size: 5MB
+      max-request-size: 6MB
   application:
     name: social-app
+
+  # API text (validation errors etc.) is deterministic English, independent of Accept-Language and of the JVM/OS
+  # locale (-Duser.language). See com.socialapp.config.ValidationConfig.
+  web:
+    locale: en
+    locale-resolver: fixed
+  messages:
+    fallback-to-system-locale: false
+
+  # Jackson 3 (Spring Boot 4 default) with the defaults Spring Boot used for Jackson 2, so REST and SSE JSON stays
+  # byte-for-byte as before: properties in declaration order (Jackson 3 would sort them alphabetically), ISO-8601
+  # dates, unknown properties ignored, no default view inclusion, lenient trailing tokens / null primitives, and
+  # characters outside the BMP (emoji) escaped as 😀 in response bodies as Jackson 2 did (Jackson 3 would
+  # write them as raw 4-byte UTF-8; both are the same JSON string).
+  jackson:
+    use-jackson2-defaults: true
+    json:
+      write:
+        combine-unicode-surrogates-in-utf8: false
 
   datasource:
     url: jdbc:postgresql://localhost:5432/socialapp
@@ -28,20 +50,29 @@ spring:
       username: neo4j
       password: socialapp123 # I know that password shouldn't be here but it's for test purpose only
 
+  # The producer and every consumer actually used are built in com.socialapp.config.KafkaConfig (each @KafkaListener
+  # names its containerFactory and groupId there). Only bootstrap-servers is read from here (KafkaConfig, KafkaAdmin).
   kafka:
     bootstrap-servers: localhost:29092
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
-      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JacksonJsonSerializer
       properties:
         spring.json.add.type.headers: false
+    # Spring Boot's DEFAULT consumer factory (beans kafkaConsumerFactory / kafkaListenerContainerFactory). No listener
+    # uses it, but it is kept safe so a listener that forgets containerFactory cannot get stuck on a poison pill:
+    # ErrorHandlingDeserializer wrapping JacksonJsonDeserializer (a malformed record becomes a DeserializationException
+    # that the DLT error handler - the unique CommonErrorHandler bean - handles), same JSON settings as KafkaConfig.
+    # No group-id on purpose: a listener must declare its own groupId.
     consumer:
-      group-id: social-app-group
       auto-offset-reset: earliest
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
       properties:
+        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JacksonJsonDeserializer
         spring.json.trusted.packages: "com.socialapp.*"
+        spring.json.value.default.type: com.socialapp.shared.events.DomainEvent
+        spring.json.use.type.headers: false
 
 server:
   port: 8080
@@ -49,13 +80,51 @@ server:
 app:
   base-url: http://localhost:8080
   upload:
-    dir: ./uploads/avatars
+    dir: ./uploads/avatars         # avatars, served under /uploads/avatars/**
+  # Images in posts (stage 3C, Feed). Files on local disk behind the MediaStorage port, served under /uploads/media/**.
+  media:
+    dir: ./uploads/media           # LocalDiskMediaStorage directory (git-ignored: uploads/)
+    max-bytes: 5242880             # 5 MB per image (413 above); keep <= spring.servlet.multipart.max-file-size
+    max-pending-per-user: 20       # unattached uploads per user (429 above)
+    unattached-ttl: 24h            # unattached uploads older than this are deleted (row + file)
+    cleanup-enabled: true          # schedule the purge (MediaCleanupJob); false: only when invoked directly
+    cleanup-interval-ms: 3600000   # purge period (also the delay of the first run)
+    cleanup-batch-size: 500        # rows per purge transaction
+  jwt:
+    # HS256 signing key, must be >= 32 bytes. Override in every non-dev environment
+    # with the APP_JWT_SECRET env var. The default below is for local development ONLY.
+    secret: ${APP_JWT_SECRET:dev-only-insecure-jwt-secret-change-me-0123456789abcdef}
+    expiration-minutes: ${APP_JWT_EXPIRATION_MINUTES:60}
+  cors:
+    allowed-origins: http://localhost:4200,http://localhost:4201
+  # Transactional outbox for domain events (com.socialapp.config.outbox)
+  outbox:
+    poll-interval-ms: 300        # relay poll period; commits also wake the relay immediately
+    batch-size: 100              # rows per relay transaction
+    max-attempts: 10             # poison rows are parked after this many failures; ERROR alert period
+    send-timeout-ms: 5000        # bound of one synchronous Kafka send (also producer timeouts)
+    retention-days: 7            # published rows older than this are deleted
+    cleanup-interval-ms: 3600000 # cleanup job period
+    cleanup-batch-size: 10000    # rows deleted per cleanup statement
+  feed:
+    followees-cache-ttl: 5s      # SSE scope=following: per-viewer followee set cache (FolloweeLookup)
+  # One-time data backfills run asynchronously after startup (com.socialapp.config.backfill.StartupBackfillRunner);
+  # each has a durable completion marker, so a completed one costs a single lookup per start.
+  backfill:
+    enabled: true                # false: do not run them automatically
+    retry-delay-ms: 30000        # a failed run (e.g. database down) is retried after this delay, resuming its progress
+    follows:
+      batch-size: 500            # followers read per keyset query (one Neo4j transaction per follower)
+    post-text:
+      batch-size: 500            # posts per transaction
 
 kafka:
   topics:
     user-events: user-events
     post-events: post-events
     reaction-events: reaction-events
+    social-events: social-events
+    comment-events: comment-events
 
 logging:
   level:
