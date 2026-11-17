@@ -17,7 +17,7 @@
     <description>Social Media Service - Polyglot Persistence</description>
 
     <properties>
-        <java.version>21</java.version>
+        <java.version>25</java.version>
         <testcontainers.version>1.21.3</testcontainers.version>
         <jjwt.version>0.12.6</jjwt.version>
     </properties>

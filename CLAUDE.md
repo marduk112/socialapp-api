@@ -1,6 +1,6 @@
 # Backend — LLM Instructions
 
-Spring Boot 3.4, Java 21, Maven. Hexagonal architecture with 4 Bounded Contexts (UserManagement, SocialGraph, Feed,
+Spring Boot 3.5, Java 25, Maven. Hexagonal architecture with 4 Bounded Contexts (UserManagement, SocialGraph, Feed,
 Notification).
 
 ## Package structure
