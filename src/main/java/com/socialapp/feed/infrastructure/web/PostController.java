@@ -78,6 +78,21 @@ public class PostController {
         return ResponseEntity.ok(pageResponse(page, me));
     }
 
+    /**
+     * Full-text search over post text, newest matches first; same envelope, cursor and size rules as {@code /feed}.
+     * {@code q}: 1..100 characters, words are ANDed ({@code "phrase"}, {@code or}, {@code -word} supported); blank or too
+     * long -> 400. No matches -> 200 with no items.
+     */
+    @GetMapping("/search/posts")
+    public ResponseEntity<FeedPageResponse> searchPosts(
+            @AuthenticationPrincipal AuthenticatedUser me,
+            @RequestParam String q,
+            @RequestParam(required = false) String cursor,
+            @RequestParam(defaultValue = "" + TimelineService.DEFAULT_SIZE) int size) {
+        var page = timelineService.searchPage(q, FeedCursor.decode(cursor), size);
+        return ResponseEntity.ok(pageResponse(page, me));
+    }
+
     /** SSE stream; {@code scope=following} only forwards posts by followed users or the caller. */
     @GetMapping(value = "/feed/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter streamFeed(

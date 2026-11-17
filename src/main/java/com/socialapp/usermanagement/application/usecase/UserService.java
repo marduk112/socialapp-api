@@ -11,6 +11,7 @@ import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -83,5 +84,26 @@ public class UserService implements CreateUserUseCase, UpdateUserUseCase {
             throw new SecurityException("Invalid credentials");
         }
         return user;
+    }
+
+    public static final int DEFAULT_SEARCH_LIMIT = 10;
+    public static final int MAX_SEARCH_LIMIT = 20;
+    public static final int MAX_SEARCH_TERM_LENGTH = 50; // = username column
+
+    /**
+     * People search by username (case-insensitive substring; exact match first, then prefix).
+     *
+     * @param term trimmed, 1..{@value #MAX_SEARCH_TERM_LENGTH} code points
+     * @param limit clamped to 1..{@value #MAX_SEARCH_LIMIT}
+     * @throws IllegalArgumentException (400) for a blank or too long term
+     */
+    @Transactional(readOnly = true)
+    public List<User> searchByUsername(String term, int limit) {
+        String t = term == null ? "" : term.trim();
+        int length = t.codePointCount(0, t.length());
+        if (length < 1 || length > MAX_SEARCH_TERM_LENGTH) {
+            throw new IllegalArgumentException("q must be 1 to " + MAX_SEARCH_TERM_LENGTH + " characters");
+        }
+        return userRepository.searchByUsername(t, Math.max(1, Math.min(limit, MAX_SEARCH_LIMIT)));
     }
 }

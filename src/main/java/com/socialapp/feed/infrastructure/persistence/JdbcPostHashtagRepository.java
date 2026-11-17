@@ -1,11 +1,14 @@
 package com.socialapp.feed.infrastructure.persistence;
 
 import com.socialapp.feed.domain.PostHashtagRepository;
+import com.socialapp.feed.domain.TrendingHashtag;
 import lombok.RequiredArgsConstructor;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Repository;
 
+import java.sql.Timestamp;
+import java.time.Instant;
 import java.util.*;
 
 /**
@@ -51,5 +54,18 @@ class JdbcPostHashtagRepository implements PostHashtagRepository {
                             .add(rs.getString("tag"));
                 });
         return result;
+    }
+
+    @Override
+    public List<TrendingHashtag> trending(Instant since, int limit) {
+        return jdbc.query("""
+                SELECT h.tag, count(*) AS posts, count(DISTINCT p.author_id) AS authors
+                FROM post_hashtags h JOIN posts p ON p.id = h.post_id
+                WHERE h.created_at >= :since
+                GROUP BY h.tag
+                ORDER BY authors DESC, posts DESC, h.tag ASC
+                LIMIT :limit""",
+                new MapSqlParameterSource().addValue("since", Timestamp.from(since)).addValue("limit", limit),
+                (rs, i) -> new TrendingHashtag(rs.getString("tag"), rs.getLong("posts"), rs.getLong("authors")));
     }
 }

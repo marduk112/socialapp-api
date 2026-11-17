@@ -40,6 +40,7 @@ import com.socialapp.shared.events.UserUpdatedEvent;
 import com.socialapp.socialgraph.domain.UserNodeRepository;
 import com.socialapp.shared.events.ReactionEvent;
 import com.socialapp.socialgraph.application.command.FollowUserCommand;
+import com.socialapp.socialgraph.application.usecase.FollowSuggestion;
 import com.socialapp.socialgraph.application.usecase.SocialGraphService;
 import com.socialapp.socialgraph.domain.UserNode;
 import com.socialapp.usermanagement.application.command.CreateUserCommand;
@@ -1089,6 +1090,39 @@ class SocialAppIntegrationTest {
                 assertThat(projectedFollows(followers)).isEqualTo(graph));
         assertThat(jdbcTemplate.queryForObject("""
                 SELECT count(*) - count(DISTINCT (follower_id, followee_id)) FROM follows""", Long.class)).isZero();
+    }
+
+    @Test
+    @Order(23)
+    void whoToFollowRanksFriendsOfFriendsByMutualFolloweesAndTopsUpWithMostFollowed() {
+        // me -> a, b ; a -> x, y, b, me ; b -> x ; z is unrelated. Direct Cypher: no outbox needed for a read query.
+        Map<String, String> ids = new java.util.HashMap<>();
+        for (String name : List.of("me", "a", "b", "x", "y", "z", "lonely")) {
+            ids.put(name, UUID.randomUUID().toString());
+            neo4jClient.query("CREATE (:User {userId: $id, username: $name})")
+                    .bind(ids.get(name)).to("id").bind("wtf-" + name).to("name").run();
+        }
+        for (String[] edge : new String[][] {{"me", "a"}, {"me", "b"}, {"a", "x"}, {"a", "y"}, {"a", "b"}, {"a", "me"},
+                {"b", "x"}}) {
+            neo4jClient.query("MATCH (f:User {userId: $f}), (t:User {userId: $t}) CREATE (f)-[:FOLLOWS]->(t)")
+                    .bind(ids.get(edge[0])).to("f").bind(ids.get(edge[1])).to("t").run();
+        }
+        UUID me = UUID.fromString(ids.get("me"));
+
+        var top = socialGraphService.getSuggestions(me, 2);
+        assertThat(top).extracting(FollowSuggestion::userId).containsExactly(ids.get("x"), ids.get("y"));
+        assertThat(top).extracting(FollowSuggestion::mutualFollowers).containsExactly(2L, 1L);
+
+        // Larger limit: friends of friends first, then the most followed; never me or anyone I follow, no duplicates.
+        var all = socialGraphService.getSuggestions(me, 20);
+        assertThat(all).extracting(FollowSuggestion::userId).startsWith(ids.get("x"), ids.get("y"))
+                .doesNotContain(ids.get("me"), ids.get("a"), ids.get("b")).doesNotHaveDuplicates();
+        assertThat(all.stream().skip(2)).allMatch(s -> s.mutualFollowers() == 0);
+
+        // Cold start: nobody followed yet -> popularity only, still never the viewer.
+        var cold = socialGraphService.getSuggestions(UUID.fromString(ids.get("lonely")), 5);
+        assertThat(cold).isNotEmpty().allMatch(s -> s.mutualFollowers() == 0)
+                .extracting(FollowSuggestion::userId).doesNotContain(ids.get("lonely"));
     }
 
     private long outboxRows(UUID messageKey) {

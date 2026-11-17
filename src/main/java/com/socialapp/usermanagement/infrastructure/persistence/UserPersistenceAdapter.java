@@ -5,6 +5,8 @@ import com.socialapp.usermanagement.domain.UserRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
+import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -45,5 +47,12 @@ public class UserPersistenceAdapter implements UserRepository {
     @Override
     public boolean existsByUsername(String username) {
         return jpaRepository.existsByUsername(username);
+    }
+
+    @Override
+    public List<User> searchByUsername(String term, int limit) {
+        String exact = term.toLowerCase(Locale.ROOT);
+        String escaped = exact.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
+        return jpaRepository.search(exact, escaped + "%", "%" + escaped + "%", limit);
     }
 }

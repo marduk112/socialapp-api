@@ -9,12 +9,14 @@ import org.junit.jupiter.api.Test;
 import org.springframework.context.ApplicationEventPublisher;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -24,7 +26,8 @@ class SocialGraphServiceTest {
 
     private final UserNodeRepository repo = mock(UserNodeRepository.class);
     private final ApplicationEventPublisher events = mock(ApplicationEventPublisher.class);
-    private final SocialGraphService service = new SocialGraphService(repo, events);
+    private final FollowSuggestionQueries suggestions = mock(FollowSuggestionQueries.class);
+    private final SocialGraphService service = new SocialGraphService(repo, events, suggestions);
 
     @Test
     void selfFollowIsRejectedBeforeTouchingTheGraph() {
@@ -105,5 +108,45 @@ class SocialGraphServiceTest {
 
         verify(repo).createIfAbsent(id.toString(), "alice", null, at.toEpochMilli());
         verify(repo).upsertProfile(id.toString(), "alice2", "a.png", at.plusSeconds(1).toEpochMilli());
+    }
+
+    private static FollowSuggestion suggestion(String id, long mutual) {
+        return new FollowSuggestion(id, "user-" + id, null, mutual);
+    }
+
+    @Test
+    void suggestionsAreToppedUpWithMostFollowedExcludingAlreadySuggested() {
+        var me = UUID.randomUUID();
+        when(suggestions.friendsOfFriends(me.toString(), 3)).thenReturn(List.of(suggestion("a", 2)));
+        when(suggestions.mostFollowed(eq(me.toString()), any(), eq(2)))
+                .thenReturn(List.of(suggestion("b", 0), suggestion("c", 0)));
+
+        var result = service.getSuggestions(me, 3);
+
+        assertThat(result).extracting(FollowSuggestion::userId).containsExactly("a", "b", "c");
+        verify(suggestions).mostFollowed(me.toString(), java.util.Set.of("a"), 2);
+    }
+
+    @Test
+    void suggestionsSkipTheFallbackWhenFriendsOfFriendsFillTheLimit() {
+        var me = UUID.randomUUID();
+        when(suggestions.friendsOfFriends(me.toString(), 2))
+                .thenReturn(List.of(suggestion("a", 3), suggestion("b", 1)));
+
+        assertThat(service.getSuggestions(me, 2)).hasSize(2);
+        verify(suggestions, never()).mostFollowed(anyString(), any(), anyInt());
+    }
+
+    @Test
+    void suggestionLimitIsClamped() {
+        var me = UUID.randomUUID();
+        when(suggestions.friendsOfFriends(anyString(), anyInt())).thenReturn(List.of());
+        when(suggestions.mostFollowed(anyString(), any(), anyInt())).thenReturn(List.of());
+
+        service.getSuggestions(me, 1000);
+        service.getSuggestions(me, 0);
+
+        verify(suggestions).friendsOfFriends(me.toString(), SocialGraphService.MAX_SUGGESTIONS);
+        verify(suggestions).friendsOfFriends(me.toString(), 1);
     }
 }

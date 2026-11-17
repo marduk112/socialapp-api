@@ -15,6 +15,8 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.*;
 
 /** Pure unit tests for UserService (no Spring context, no infrastructure). */
@@ -83,5 +85,25 @@ class UserServiceTest {
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> User.register("alice", null, "h", null))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void searchTrimsTheTermAndClampsTheLimit() {
+        when(repo.searchByUsername(anyString(), anyInt())).thenReturn(java.util.List.of());
+
+        service.searchByUsername("  Ali  ", 1000);
+        service.searchByUsername("ali", 0);
+
+        verify(repo).searchByUsername("Ali", UserService.MAX_SEARCH_LIMIT);
+        verify(repo).searchByUsername("ali", 1);
+    }
+
+    @Test
+    void searchRejectsBlankAndOverlongTermsWithoutTouchingTheRepository() {
+        assertThatThrownBy(() -> service.searchByUsername("  ", 10)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> service.searchByUsername(null, 10)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> service.searchByUsername("x".repeat(UserService.MAX_SEARCH_TERM_LENGTH + 1), 10))
+                .isInstanceOf(IllegalArgumentException.class);
+        verify(repo, never()).searchByUsername(anyString(), anyInt());
     }
 }

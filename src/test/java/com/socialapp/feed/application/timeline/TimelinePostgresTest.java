@@ -248,4 +248,90 @@ class TimelinePostgresTest {
 
         assertThat(follows.findActiveFolloweeIds(ALICE)).containsExactlyInAnyOrder(BOB, CAROL);
     }
+
+    // ── full-text search (V23) ───────────────────────────────────────────────
+
+    private UUID postWithText(String content, String type, Instant createdAt) {
+        UUID id = UUID.randomUUID();
+        jdbc.update("""
+                INSERT INTO posts (id, author_id, author_username, content, type, created_at, updated_at)
+                VALUES (?, ?, 'u', ?, ?, ?, ?)""", id, BOB, content, type, createdAt.atOffset(ZoneOffset.UTC),
+                createdAt.atOffset(ZoneOffset.UTC));
+        return id;
+    }
+
+    private List<UUID> search(String q) {
+        return timeline.searchPage(q, null, 100).posts().stream().map(Post::getId).toList();
+    }
+
+    @Test
+    void searchMatchesWordsCaseInsensitivelyNewestFirst() {
+        UUID older = postWithText("Learning Kafka and Spring", "POST", T0);
+        UUID newer = postWithText("kafka is fun", "POST", T0.plusSeconds(5));
+        postWithText("nothing relevant here", "POST", T0.plusSeconds(6));
+
+        assertThat(search("KAFKA")).containsExactly(newer, older);
+        assertThat(search("kafka spring")).containsExactly(older); // words are ANDed
+        assertThat(search("kafka or fun")).containsExactly(newer, older);
+        assertThat(search("kafka -spring")).containsExactly(newer);
+        assertThat(search("\"kafka is\"")).containsExactly(newer);
+        assertThat(search("absent")).isEmpty();
+    }
+
+    @Test
+    void searchIgnoresRepostsAndFindsQuoteComments() {
+        UUID quote = postWithText("my take on kafka", "QUOTE", T0);
+        // A REPOST has no text of its own (V18: content = '') and points at its original.
+        jdbc.update("""
+                INSERT INTO posts (id, author_id, author_username, content, type, original_post_id, created_at, updated_at)
+                VALUES (?, ?, 'u', '', 'REPOST', ?, ?, ?)""", UUID.randomUUID(), CAROL, quote,
+                T0.plusSeconds(1).atOffset(ZoneOffset.UTC), T0.plusSeconds(1).atOffset(ZoneOffset.UTC));
+
+        assertThat(search("kafka")).containsExactly(quote);
+    }
+
+    @Test
+    void searchTreatsAHashtagAsItsWordAndSurvivesHostileInput() {
+        UUID tagged = postWithText("Shipping #Kafka today", "POST", T0);
+
+        assertThat(search("#kafka")).containsExactly(tagged);
+        // never a syntax error, whatever the user typed
+        for (String q : new String[] {"!!!", "&|:*", "'", "\"", "a & (b", "-", "((("}) {
+            assertThat(search(q)).as(q).isEmpty();
+        }
+    }
+
+    @Test
+    void searchPagesWithTheSameKeysetCursorAsTheTimeline() {
+        List<UUID> expected = new ArrayList<>();
+        for (int i = 0; i < 7; i++) expected.add(postWithText("kafka " + i, "POST", T0)); // ties on created_at
+        postWithText("other", "POST", T0);
+        expected = jdbc.queryForList("""
+                SELECT id FROM posts WHERE content LIKE 'kafka%' ORDER BY created_at DESC, id DESC""", UUID.class);
+
+        List<UUID> seen = new ArrayList<>();
+        FeedCursor cursor = null;
+        for (int i = 0; i < 20; i++) {
+            var page = timeline.searchPage("kafka", cursor == null ? null : FeedCursor.decode(cursor.encode()), 3);
+            page.posts().forEach(p -> seen.add(p.getId()));
+            if (page.next() == null) break;
+            assertThat(page.posts()).hasSize(3);
+            cursor = page.next();
+        }
+        assertThat(seen).containsExactlyElementsOf(expected);
+    }
+
+    @Test
+    void searchRejectsBlankOrOverlongQueriesAndBadSizes() {
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> timeline.searchPage("   ", null, 20))
+                .isInstanceOf(IllegalArgumentException.class);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> timeline.searchPage(null, null, 20))
+                .isInstanceOf(IllegalArgumentException.class);
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                        () -> timeline.searchPage("x".repeat(TimelineService.MAX_QUERY_LENGTH + 1), null, 20))
+                .isInstanceOf(IllegalArgumentException.class);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> timeline.searchPage("kafka", null, 0))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThat(timeline.searchPage("x".repeat(TimelineService.MAX_QUERY_LENGTH), null, 20).posts()).isEmpty();
+    }
 }

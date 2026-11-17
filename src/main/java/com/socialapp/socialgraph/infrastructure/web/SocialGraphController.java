@@ -1,6 +1,7 @@
 package com.socialapp.socialgraph.infrastructure.web;
 
 import com.socialapp.socialgraph.application.command.FollowUserCommand;
+import com.socialapp.socialgraph.application.usecase.FollowSuggestion;
 import com.socialapp.socialgraph.application.usecase.SocialGraphService;
 import com.socialapp.socialgraph.domain.UserNode;
 import com.socialapp.shared.security.AuthenticatedUser;
@@ -53,6 +54,15 @@ public class SocialGraphController {
         );
     }
 
+    /** "Who to follow" for the caller: friends of friends, topped up with the most followed users. */
+    @GetMapping("/suggestions")
+    public ResponseEntity<List<SuggestionResponse>> getSuggestions(
+            @AuthenticationPrincipal AuthenticatedUser me,
+            @RequestParam(defaultValue = "" + SocialGraphService.DEFAULT_SUGGESTIONS) int limit) {
+        return ResponseEntity.ok(socialGraphService.getSuggestions(me.id(), limit).stream()
+                .map(SuggestionResponse::from).toList());
+    }
+
     /** Read-only query; {@code followerId} defaults to the caller when omitted. */
     @GetMapping("/is-following")
     public ResponseEntity<Boolean> isFollowing(
@@ -76,6 +86,12 @@ public class SocialGraphController {
     record UserNodeResponse(String userId, String username, String avatarUrl) {
         static UserNodeResponse from(UserNode node) {
             return new UserNodeResponse(node.getUserId(), node.getUsername(), node.getAvatarUrl());
+        }
+    }
+
+    record SuggestionResponse(String userId, String username, String avatarUrl, long mutualFollowers) {
+        static SuggestionResponse from(FollowSuggestion s) {
+            return new SuggestionResponse(s.userId(), s.username(), s.avatarUrl(), s.mutualFollowers());
         }
     }
 }

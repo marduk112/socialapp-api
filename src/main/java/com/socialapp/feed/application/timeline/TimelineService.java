@@ -28,6 +28,7 @@ public class TimelineService {
 
     public static final int DEFAULT_SIZE = 20;
     public static final int MAX_SIZE = 100;
+    public static final int MAX_QUERY_LENGTH = 100;
 
     private final PostRepository postRepository;
 
@@ -61,6 +62,24 @@ public class TimelineService {
         var after = cursor == null ? FeedCursor.START : cursor;
         return toPage(postRepository.findHashtagPageAfter(normalised, after.createdAt(), after.id(), pageSize + 1),
                 pageSize);
+    }
+
+    /**
+     * Full-text search over post text, same ordering, cursor and size rules as {@link #page} (newest matches first).
+     *
+     * @param query user input; trimmed, 1..{@value #MAX_QUERY_LENGTH} code points
+     * @throws IllegalArgumentException (400) for a blank/too long query or {@code size < 1}
+     */
+    @Transactional(readOnly = true)
+    public FeedPage searchPage(String query, FeedCursor cursor, int size) {
+        String q = query == null ? "" : query.trim();
+        int length = q.codePointCount(0, q.length());
+        if (length < 1 || length > MAX_QUERY_LENGTH) {
+            throw new IllegalArgumentException("q must be 1 to " + MAX_QUERY_LENGTH + " characters");
+        }
+        int pageSize = pageSize(size);
+        var after = cursor == null ? FeedCursor.START : cursor;
+        return toPage(postRepository.findSearchPageAfter(q, after.createdAt(), after.id(), pageSize + 1), pageSize);
     }
 
     private static int pageSize(int size) {

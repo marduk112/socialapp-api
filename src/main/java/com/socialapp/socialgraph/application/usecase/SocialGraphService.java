@@ -13,6 +13,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.UUID;
 
@@ -21,8 +22,12 @@ import java.util.UUID;
 @Slf4j
 public class SocialGraphService {
 
+    public static final int DEFAULT_SUGGESTIONS = 5;
+    public static final int MAX_SUGGESTIONS = 20;
+
     private final UserNodeRepository userNodeRepository;
     private final ApplicationEventPublisher applicationEvents;
+    private final FollowSuggestionQueries suggestionQueries;
 
     /** Idempotent; never overwrites an existing node (it may already hold a newer update). */
     @Transactional("neo4jTransactionManager")
@@ -87,6 +92,28 @@ public class SocialGraphService {
     @Transactional(value = "neo4jTransactionManager", readOnly = true)
     public List<UserNode> getFollowers(String userId) {
         return userNodeRepository.findFollowers(userId);
+    }
+
+    /**
+     * "Who to follow": friends of friends ranked by mutual followees, topped up with the most followed users
+     * (cold start / small graphs). Never contains the viewer or anyone they already follow.
+     *
+     * @param limit clamped to 1..{@value #MAX_SUGGESTIONS}
+     */
+    @Transactional(value = "neo4jTransactionManager", readOnly = true)
+    public List<FollowSuggestion> getSuggestions(UUID viewerId, int limit) {
+        if (viewerId == null) {
+            throw new IllegalArgumentException("viewerId is required");
+        }
+        int size = Math.max(1, Math.min(limit, MAX_SUGGESTIONS));
+        String viewer = viewerId.toString();
+        var result = new java.util.ArrayList<>(suggestionQueries.friendsOfFriends(viewer, size));
+        if (result.size() < size) {
+            var seen = new LinkedHashSet<String>();
+            result.forEach(s -> seen.add(s.userId()));
+            result.addAll(suggestionQueries.mostFollowed(viewer, seen, size - result.size()));
+        }
+        return List.copyOf(result);
     }
 
     @Transactional(value = "neo4jTransactionManager", readOnly = true)

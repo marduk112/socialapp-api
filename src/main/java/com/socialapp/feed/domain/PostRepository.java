@@ -71,6 +71,22 @@ public interface PostRepository extends JpaRepository<Post, UUID> {
     List<Post> findHashtagPageAfter(@Param("tag") String tag, @Param("createdAt") Instant createdAt,
                                     @Param("id") UUID id, @Param("limit") int limit);
 
+    /**
+     * Posts whose own text matches {@code query} (Postgres full-text, {@code simple} configuration, parsed by
+     * {@code websearch_to_tsquery}: arbitrary user input is safe - words are ANDed, {@code "phrases"}, {@code or}
+     * and {@code -excluded} work), newest first, strictly after {@code (createdAt, id)}. REPOSTs carry no text.
+     * Uses {@code ix_posts_content_fts} (V23); the ordering and cursor are the same as for {@link #findPageAfter}.
+     */
+    @Query(value = """
+            SELECT p.* FROM posts p
+            WHERE to_tsvector('simple', p.content) @@ websearch_to_tsquery('simple', :query)
+              AND p.type <> 'REPOST'
+              AND (p.created_at, p.id) < (CAST(:createdAt AS timestamptz), CAST(:id AS uuid))
+            ORDER BY p.created_at DESC, p.id DESC
+            LIMIT :limit""", nativeQuery = true)
+    List<Post> findSearchPageAfter(@Param("query") String query, @Param("createdAt") Instant createdAt,
+                                   @Param("id") UUID id, @Param("limit") int limit);
+
     // ── Reposts / quotes (stage 2C) ─────────────────────────────────────────
 
     /** The REPOST of {@code originalPostId} by {@code authorId}, if any (unique, V18 partial index). */

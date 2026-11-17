@@ -242,6 +242,9 @@ Current migrations:
   width, height, size_bytes, storage_key UNIQUE, created_at)`, CHECKs (types, attached <=> post_id+position, sizes), partial
   unique `ux_post_media_post_position (post_id, position)`, partial `ix_post_media_unattached_owner (owner_id, created_at)` and
   `ix_post_media_unattached_created (created_at)` (both `WHERE post_id IS NULL`). No FK to users (see "Images in posts")
+- `V23__posts_fulltext_search.sql` — GIN `ix_posts_content_fts` on `to_tsvector('simple', content)` (see "Search")
+- `V24__users_username_trigram.sql` — `pg_trgm` extension + GIN `ix_users_username_trgm` on `lower(username)` (see "Search")
+- `V25__post_hashtags_created_index.sql` — `ix_post_hashtags_created (created_at DESC)` for the trending window scan (see "Trending hashtags")
 
 **Always create a new numbered migration file. Never modify existing ones.**
 
@@ -557,3 +560,43 @@ Config: `app.jwt.secret` (env `APP_JWT_SECRET`, >= 32 bytes) and `app.jwt.expira
 ```
 
 Do NOT use `mvn` command directly — use the Maven wrapper `./mvnw`.
+
+## Who to follow (stage 4A)
+
+`GET /api/v1/social/suggestions?limit=5` (caller = JWT principal) -> `[{userId, username, avatarUrl, mutualFollowers}]`.
+`SocialGraphService.getSuggestions` (read-only Neo4j tx, limit clamped 1..20): friends of friends ranked by number of
+mutual followees (ties: username, id), topped up with the most followed users (`mutualFollowers = 0`, cold start / small
+graphs). Never contains the viewer or anyone already followed. Cypher lives in `Neo4jFollowSuggestionQueries`
+(port `FollowSuggestionQueries`, `Neo4jClient`); the popularity fallback scans all `:User` nodes - revisit (cached
+follower counts) if the graph gets large. Tests: `SocialGraphServiceTest` (fill/clamp), `SocialAppIntegrationTest` order 23.
+
+## Search (stage 4B)
+
+Both searches are plain Postgres, one per owning BC (no cross-BC import, no Kafka).
+
+**Posts** `GET /api/v1/search/posts?q=&cursor=&size=20` (Feed, `PostController`) -> same `{items, nextCursor}` envelope, keyset
+cursor and size rules as `/feed` (`TimelineService.searchPage`, `PostRepository.findSearchPageAfter`). Newest matches first
+(NOT relevance-ranked: keeps the opaque `FeedCursor` and stable paging). Match = `to_tsvector('simple', content) @@
+websearch_to_tsquery('simple', :q)`; the query must use exactly that expression to hit `ix_posts_content_fts` (V23). `simple`
+= no stemming/stop words/accent folding (works the same for PL and EN, but "kot" does not match "kotem"). `websearch_to_tsquery`
+never raises on user input (`!!!`, quotes, parentheses -> no rows): words are ANDed, `"phrase"`, `or`, `-word` work, `#kafka`
+matches the word kafka. Searches a post's own text (QUOTE: its comment); REPOSTs have `content = ''` so never match (query also
+filters `type <> 'REPOST'`); comments and `original_content` are not searched. `q` trimmed, 1..100 code points, else 400
+(also missing `q`); `size` < 1 -> 400.
+
+**People** `GET /api/v1/search/users?q=&limit=10` (UserManagement, `UserSearchController`, `UserService.searchByUsername`) ->
+`[{id, username, bio, avatarUrl}]` (public fields only - never e-mail). Case-insensitive substring of `username`; ranked exact
+match, then prefix, then the rest by username; `limit` clamped 1..20, no cursor. `q` trimmed, 1..50 code points, else 400. LIKE
+wildcards in `q` are literal (escaped in `UserPersistenceAdapter`). Index: trigram GIN (V24) serves terms of >= 3 characters;
+shorter ones scan the users table. `CREATE EXTENSION pg_trgm` needs only CREATE on the database (trusted extension, PG 13+).
+Tests: `TimelinePostgresTest` (search section), `UserSearchPostgresTest`, `UserServiceTest`, e2e `search.spec.ts`.
+
+## Trending hashtags (stage 4C)
+
+`GET /api/v1/trends/hashtags?hours=24&limit=10` (Feed, `TrendsController` -> `TrendsService` -> `PostHashtagRepository.trending`)
+-> `[{tag, posts, authors}]` (tag normalised, no `#`). `hours` clamped 1..168, `limit` clamped 1..20 (never 400); nothing in the
+window -> 200 `[]`. ONE aggregate over `post_hashtags JOIN posts` for rows with `created_at >= now - hours` (`ix_post_hashtags_created`,
+V25), ranked by DISTINCT AUTHORS, then posts, then tag - so one account repeating a tag cannot trend it. A post counts once per
+tag however often the text repeats it (the index is de-duplicated). Counts POSTs and QUOTEs (own text), never REPOSTs. Computed per
+request, no cache (a fresh post shows at once); add a short TTL cache here if the feed's request volume ever makes it matter.
+Not "velocity": a tag is ranked by volume in the window, not by growth. Tests: `TrendsServiceTest`, `TrendsPostgresTest`, e2e `trends.spec.ts`.
