@@ -45,7 +45,7 @@ import static org.mockito.Mockito.when;
 class OutboxRelayPostgresTest {
 
     @Container
-    static final PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:16-alpine");
+    static final PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:18-alpine");
 
     private static HikariDataSource dataSource;
     private static JdbcTemplate jdbc;

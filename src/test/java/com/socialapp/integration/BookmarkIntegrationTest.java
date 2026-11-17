@@ -37,16 +37,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 class BookmarkIntegrationTest {
 
     @Container
-    static final PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:16-alpine")
+    static final PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:18-alpine")
             .withDatabaseName("socialapp_test").withUsername("test").withPassword("test");
 
     @Container
-    static final Neo4jContainer neo4j = new Neo4jContainer("neo4j:5.18")
+    static final Neo4jContainer neo4j = new Neo4jContainer("neo4j:5.26")
             .withAdminPassword("testpassword").withoutAuthentication();
 
     @Container
     static final ConfluentKafkaContainer kafka = new ConfluentKafkaContainer(
-            DockerImageName.parse("confluentinc/cp-kafka:7.6.0"));
+            DockerImageName.parse("confluentinc/cp-kafka:8.3.3"));
 
     @DynamicPropertySource
     static void configureProperties(DynamicPropertyRegistry registry) {

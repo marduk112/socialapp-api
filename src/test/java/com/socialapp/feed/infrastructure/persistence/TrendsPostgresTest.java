@@ -30,7 +30,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class TrendsPostgresTest {
 
     @Container
-    static final PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:16-alpine");
+    static final PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:18-alpine");
 
     @DynamicPropertySource
     static void props(DynamicPropertyRegistry registry) {

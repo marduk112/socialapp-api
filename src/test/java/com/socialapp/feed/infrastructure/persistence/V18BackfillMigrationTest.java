@@ -24,7 +24,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class V18BackfillMigrationTest {
 
     @Container
-    static final PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:16-alpine");
+    static final PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:18-alpine");
 
     private static final Instant T0 = Instant.parse("2026-01-01T10:00:00Z");
     private static final UUID ALICE = UUID.randomUUID();
