@@ -175,13 +175,13 @@ class MediaControllerTest {
         byte[] big = new byte[5 * 1024 * 1024 + 1];
         System.arraycopy(TestImages.png(2, 2), 0, big, 0, 8);
         upload(file("big.png", "image/png", big))
-                .andExpect(status().isPayloadTooLarge())
+                .andExpect(status().isContentTooLarge())
                 .andExpect(jsonPath("$.error", is("The file is larger than 5 MB")));
     }
 
     @Test
     void tooManyPixelsIs413() throws Exception {
-        upload(file("wide.png", "image/png", TestImages.png(8001, 1))).andExpect(status().isPayloadTooLarge());
+        upload(file("wide.png", "image/png", TestImages.png(8001, 1))).andExpect(status().isContentTooLarge());
     }
 
     @Test

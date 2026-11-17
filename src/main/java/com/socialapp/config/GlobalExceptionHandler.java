@@ -54,7 +54,7 @@ public class GlobalExceptionHandler {
      */
     @ExceptionHandler(MaxUploadSizeExceededException.class)
     public ResponseEntity<Map<String, Object>> handleUploadTooLarge(MaxUploadSizeExceededException ex) {
-        return error(HttpStatus.PAYLOAD_TOO_LARGE, "The uploaded file is too large");
+        return error(HttpStatus.CONTENT_TOO_LARGE, "The uploaded file is too large");
     }
 
     /** Not a (valid) multipart request where one is expected, e.g. POST /media with a JSON body. */

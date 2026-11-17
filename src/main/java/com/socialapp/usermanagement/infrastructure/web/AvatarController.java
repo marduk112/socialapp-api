@@ -49,7 +49,7 @@ public class AvatarController {
             return ResponseEntity.badRequest().build();
         }
         if (file.getSize() > MAX_BYTES) {
-            return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE).build();
+            return ResponseEntity.status(HttpStatus.CONTENT_TOO_LARGE).build();
         }
         String contentType = file.getContentType();
         if (contentType == null || !ALLOWED_TYPES.contains(contentType)) {

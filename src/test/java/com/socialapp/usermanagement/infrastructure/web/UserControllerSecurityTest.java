@@ -227,7 +227,7 @@ class UserControllerSecurityTest {
 
         mvc.perform(multipart("/api/v1/users/{id}/avatar", alice.getId()).file(big)
                         .header(HttpHeaders.AUTHORIZATION, bearer(alice)))
-                .andExpect(status().isPayloadTooLarge());
+                .andExpect(status().isContentTooLarge());
 
         verify(userService, never()).updateAvatar(any(), any());
     }

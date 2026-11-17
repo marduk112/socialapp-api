@@ -43,7 +43,7 @@ public class MediaController {
     public ResponseEntity<Map<String, Object>> rejected(MediaRejectedException ex) {
         var status = switch (ex.reason()) {
             case EMPTY -> HttpStatus.BAD_REQUEST;
-            case TOO_LARGE -> HttpStatus.PAYLOAD_TOO_LARGE;
+            case TOO_LARGE -> HttpStatus.CONTENT_TOO_LARGE;
             case UNSUPPORTED -> HttpStatus.UNSUPPORTED_MEDIA_TYPE;
             case TOO_MANY_PENDING -> HttpStatus.TOO_MANY_REQUESTS;
             case BUSY -> HttpStatus.SERVICE_UNAVAILABLE;
