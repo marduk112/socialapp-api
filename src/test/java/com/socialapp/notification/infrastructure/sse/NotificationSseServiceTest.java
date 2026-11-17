@@ -49,8 +49,8 @@ class NotificationSseServiceTest {
 
     private final List<RecordingEmitter> next = new CopyOnWriteArrayList<>();
     private final NotificationSseService service = new NotificationSseService(
-            new ObjectMapper().findAndRegisterModules()
-                    .disable(com.fasterxml.jackson.databind.SerializationFeature.WRITE_DATES_AS_TIMESTAMPS),
+            tools.jackson.databind.json.JsonMapper.builderWithJackson2Defaults()
+                    .disable(tools.jackson.databind.cfg.DateTimeFeature.WRITE_DATES_AS_TIMESTAMPS).build(),
             () -> next.isEmpty() ? new RecordingEmitter() : next.remove(0));
 
     private static NotificationView forUser(UUID recipient) {

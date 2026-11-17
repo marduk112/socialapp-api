@@ -1,6 +1,6 @@
 # Backend — LLM Instructions
 
-Spring Boot 3.5, Java 25, Maven. Hexagonal architecture with 4 Bounded Contexts (UserManagement, SocialGraph, Feed,
+Spring Boot 4.0, Java 25, Maven. Hexagonal architecture with 4 Bounded Contexts (UserManagement, SocialGraph, Feed,
 Notification).
 
 ## Package structure
@@ -172,17 +172,19 @@ without tags are passed once (the cursor), never rescanned. Note: a post created
 
 ## Kafka configuration rules
 
-- All consumers must use `ErrorHandlingDeserializer` wrapping `JsonDeserializer`:
+- All consumers must use `ErrorHandlingDeserializer` wrapping `JacksonJsonDeserializer` (Spring Kafka 4's Jackson 3
+  successor of the deprecated `JsonDeserializer`, same `spring.json.*` properties):
   ```java
   props.put(VALUE_DESERIALIZER_CLASS_CONFIG, ErrorHandlingDeserializer.class);
-  props.put(ErrorHandlingDeserializer.VALUE_DESERIALIZER_CLASS, JsonDeserializer.class);
+  props.put(ErrorHandlingDeserializer.VALUE_DESERIALIZER_CLASS, JacksonJsonDeserializer.class);
   ```
 - Trusted packages: `com.socialapp.*`
 - Every `@KafkaListener` names its `containerFactory` (from `KafkaConfig`) and `groupId`. `spring.kafka.consumer.*` in
   application.yml only configures Spring Boot's unused default factory; it is kept safe anyway (ErrorHandlingDeserializer
-  -> JsonDeserializer, `DomainEvent` default type, no group id) and the default container factory gets the DLT error
+  -> JacksonJsonDeserializer, `DomainEvent` default type, no group id) and the default container factory gets the DLT error
   handler. `SocialAppIntegrationTest` asserts both.
-- Producer: `ACKS_CONFIG = all`, `ENABLE_IDEMPOTENCE_CONFIG = true`
+- Producer: `ACKS_CONFIG = all`, `ENABLE_IDEMPOTENCE_CONFIG = true`; value serializer `KafkaConfig.eventSerializer()`
+  (`JacksonJsonSerializer` on `DomainEventCodec.wireMapper()`, no type headers), also used for re-serialised dead letters
 - Topics: `user-events`, `post-events`, `reaction-events`, `social-events`, `comment-events` (3 partitions,
   replication factor 1), each with a `<topic>.DLT` (DefaultErrorHandler: 3 attempts, then dead-letter)
 - Consumer groups (one listener per BC per topic, switch on the sealed `DomainEvent`):
@@ -560,6 +562,40 @@ Config: `app.jwt.secret` (env `APP_JWT_SECRET`, >= 32 bytes) and `app.jwt.expira
 ```
 
 Do NOT use `mvn` command directly — use the Maven wrapper `./mvnw`.
+
+## Spring Boot 4 migration notes (3.5 -> 4.0)
+
+- **Modular starters.** Auto-configuration is split per technology: `spring-boot-starter-flyway` and
+  `spring-boot-starter-kafka` are required (with only `flyway-core` / `spring-kafka`, Flyway would silently not run and
+  KafkaAdmin / Boot's default Kafka factories would not exist). Web is `spring-boot-starter-webmvc` (was `-web`), JSON
+  is `spring-boot-starter-jackson`. `UserDetailsServiceAutoConfiguration` moved to
+  `org.springframework.boot.security.autoconfigure`.
+- **Test starters and annotation packages.** `spring-boot-starter-webmvc-test` (`@WebMvcTest`:
+  `org.springframework.boot.webmvc.test.autoconfigure`), `spring-boot-starter-data-jpa-test` (`@DataJpaTest`:
+  `org.springframework.boot.data.jpa.test.autoconfigure`, `@AutoConfigureTestDatabase`:
+  `org.springframework.boot.jdbc.test.autoconfigure`, `TestEntityManager`: `org.springframework.boot.jpa.test.autoconfigure`),
+  `spring-boot-starter-security-test`. `@MockBean`/`@SpyBean` no longer exist: use `@MockitoBean`/`@MockitoSpyBean`.
+- **Jackson 3** (`tools.jackson.*`; annotations stay `com.fasterxml.jackson.annotation`) in all production code. Boot's
+  bean is a `JsonMapper`; there is no Jackson 2 `ObjectMapper` bean. Jackson 3 exceptions are unchecked
+  (`JacksonException`). Wire formats are unchanged and must stay so:
+  - REST/SSE: `spring.jackson.use-jackson2-defaults: true` (declaration order instead of Jackson 3's alphabetical
+    order, ISO dates, lenient reads) + `spring.jackson.json.write.combine-unicode-surrogates-in-utf8: false` (emoji
+    escaped in response bodies as before).
+  - Events (outbox payload, Kafka values, re-serialised dead letters): `DomainEventCodec.wireMapper()` (Jackson 3
+    `builderWithJackson2Defaults`), so `occurredAt` stays a decimal epoch-seconds number. `DomainEventWireFormatTest` pins
+    the bytes captured from the Boot 3.5 build. Never produce events with Boot's mapper or Spring Kafka's
+    `JacksonMapperUtils.enhancedJsonMapper()` (ISO dates, alphabetical order). Consumers use `JacksonJsonDeserializer`'s
+    default mapper (reads both date forms, ignores unknown properties).
+  - Spring Kafka's Jackson 2 `JsonSerializer`/`JsonDeserializer`/`JacksonUtils` are deprecated for removal; do not use
+    them. Jackson 2 is still on the class path, only transitively (Flyway, jjwt-jackson); some tests parse responses
+    with it as an independent reader.
+- **Testcontainers 2.0.x**, version managed by Boot (no own property/BOM): artifacts `testcontainers-junit-jupiter`,
+  `-postgresql`, `-neo4j`, `-kafka`; classes `org.testcontainers.postgresql.PostgreSQLContainer`,
+  `org.testcontainers.neo4j.Neo4jContainer` (no type parameter) and, for the `confluentinc/cp-kafka` image,
+  `org.testcontainers.kafka.ConfluentKafkaContainer` (the old `org.testcontainers.containers.*` classes are deprecated).
+- **Lombok on JDK 25:** javac 23+ runs only declared annotation processors, so `maven-compiler-plugin` lists Lombok in
+  `annotationProcessorPaths` (`${lombok.version}`, managed by Boot). Without it a clean build fails.
+- Left as is (deprecated, still working): `HttpStatus.PAYLOAD_TOO_LARGE` (Framework 7 name: `CONTENT_TOO_LARGE`, 413).
 
 ## Who to follow (stage 4A)
 

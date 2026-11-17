@@ -5,6 +5,7 @@ import com.socialapp.feed.application.timeline.FeedScope;
 import com.socialapp.feed.application.timeline.FolloweeLookup;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.io.IOException;
 import java.time.Instant;
@@ -47,7 +48,7 @@ class FeedSseServiceTest {
 
     private final FolloweeLookup followees = mock(FolloweeLookup.class);
     private final List<RecordingEmitter> created = new CopyOnWriteArrayList<>();
-    private final FeedSseService service = new FeedSseService(new ObjectMapper().findAndRegisterModules(), followees,
+    private final FeedSseService service = new FeedSseService(JsonMapper.builderWithJackson2Defaults().build(), followees,
             () -> {
                 var e = new RecordingEmitter();
                 created.add(e);

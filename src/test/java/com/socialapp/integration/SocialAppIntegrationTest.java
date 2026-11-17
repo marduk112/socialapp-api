@@ -16,7 +16,7 @@ import org.springframework.kafka.core.ConsumerFactory;
 import org.springframework.kafka.listener.CommonErrorHandler;
 import org.springframework.kafka.support.KafkaHeaders;
 import org.springframework.kafka.support.serializer.ErrorHandlingDeserializer;
-import org.springframework.kafka.support.serializer.JsonDeserializer;
+import org.springframework.kafka.support.serializer.JacksonJsonDeserializer;
 import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.util.ReflectionTestUtils;
 import com.socialapp.feed.application.timeline.FeedScope;
@@ -66,9 +66,9 @@ import org.springframework.transaction.support.TransactionTemplate;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
-import org.testcontainers.containers.KafkaContainer;
-import org.testcontainers.containers.Neo4jContainer;
-import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.kafka.ConfluentKafkaContainer;
+import org.testcontainers.neo4j.Neo4jContainer;
+import org.testcontainers.postgresql.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
@@ -114,18 +114,18 @@ class SocialAppIntegrationTest {
 
     // ── Containers (started in parallel by Testcontainers) ───────────────────
     @Container
-    static final PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine")
+    static final PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:16-alpine")
             .withDatabaseName("socialapp_test")
             .withUsername("test")
             .withPassword("test");
 
     @Container
-    static final Neo4jContainer<?> neo4j = new Neo4jContainer<>("neo4j:5.18")
+    static final Neo4jContainer neo4j = new Neo4jContainer("neo4j:5.18")
             .withAdminPassword("testpassword")
             .withoutAuthentication();
 
     @Container
-    static final KafkaContainer kafka = new KafkaContainer(
+    static final ConfluentKafkaContainer kafka = new ConfluentKafkaContainer(
             DockerImageName.parse("confluentinc/cp-kafka:7.6.0"));
 
     // ── Dynamic properties wired to Spring context ───────────────────────────
@@ -829,8 +829,8 @@ class SocialAppIntegrationTest {
         assertThat(config.get(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG))
                 .isIn(ErrorHandlingDeserializer.class, ErrorHandlingDeserializer.class.getName());
         assertThat(config.get(ErrorHandlingDeserializer.VALUE_DESERIALIZER_CLASS))
-                .isIn(JsonDeserializer.class, JsonDeserializer.class.getName());
-        assertThat(config.get(JsonDeserializer.VALUE_DEFAULT_TYPE))
+                .isIn(JacksonJsonDeserializer.class, JacksonJsonDeserializer.class.getName());
+        assertThat(config.get(JacksonJsonDeserializer.VALUE_DEFAULT_TYPE))
                 .isEqualTo("com.socialapp.shared.events.DomainEvent");
         // the default container factory dead-letters too (Boot wires the unique CommonErrorHandler bean)
         assertThat(ReflectionTestUtils.getField(bootDefaultListenerContainerFactory, "commonErrorHandler"))

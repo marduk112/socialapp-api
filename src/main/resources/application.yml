@@ -17,6 +17,17 @@ spring:
   messages:
     fallback-to-system-locale: false
 
+  # Jackson 3 (Spring Boot 4 default) with the defaults Spring Boot used for Jackson 2, so REST and SSE JSON stays
+  # byte-for-byte as before: properties in declaration order (Jackson 3 would sort them alphabetically), ISO-8601
+  # dates, unknown properties ignored, no default view inclusion, lenient trailing tokens / null primitives, and
+  # characters outside the BMP (emoji) escaped as 😀 in response bodies as Jackson 2 did (Jackson 3 would
+  # write them as raw 4-byte UTF-8; both are the same JSON string).
+  jackson:
+    use-jackson2-defaults: true
+    json:
+      write:
+        combine-unicode-surrogates-in-utf8: false
+
   datasource:
     url: jdbc:postgresql://localhost:5432/socialapp
     username: socialapp
@@ -45,20 +56,20 @@ spring:
     bootstrap-servers: localhost:29092
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
-      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JacksonJsonSerializer
       properties:
         spring.json.add.type.headers: false
     # Spring Boot's DEFAULT consumer factory (beans kafkaConsumerFactory / kafkaListenerContainerFactory). No listener
     # uses it, but it is kept safe so a listener that forgets containerFactory cannot get stuck on a poison pill:
-    # ErrorHandlingDeserializer wrapping JsonDeserializer (a malformed record becomes a DeserializationException that
-    # the DLT error handler - the unique CommonErrorHandler bean - handles), same JSON settings as KafkaConfig.
+    # ErrorHandlingDeserializer wrapping JacksonJsonDeserializer (a malformed record becomes a DeserializationException
+    # that the DLT error handler - the unique CommonErrorHandler bean - handles), same JSON settings as KafkaConfig.
     # No group-id on purpose: a listener must declare its own groupId.
     consumer:
       auto-offset-reset: earliest
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
       properties:
-        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JsonDeserializer
+        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JacksonJsonDeserializer
         spring.json.trusted.packages: "com.socialapp.*"
         spring.json.value.default.type: com.socialapp.shared.events.DomainEvent
         spring.json.use.type.headers: false

@@ -4,7 +4,7 @@ import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.postgresql.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
@@ -24,7 +24,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class V18BackfillMigrationTest {
 
     @Container
-    static final PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine");
+    static final PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:16-alpine");
 
     private static final Instant T0 = Instant.parse("2026-01-01T10:00:00Z");
     private static final UUID ALICE = UUID.randomUUID();

@@ -1,6 +1,5 @@
 package com.socialapp.feed.infrastructure.sse;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.socialapp.feed.application.timeline.FeedScope;
 import com.socialapp.feed.application.timeline.FolloweeLookup;
 import com.socialapp.feed.application.media.MediaView;
@@ -14,6 +13,8 @@ import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.io.IOException;
 import java.time.Instant;
@@ -39,16 +40,16 @@ public class FeedSseService {
     record Subscription(SseEmitter emitter, UUID viewerId, FeedScope scope) {}
 
     private final List<Subscription> subscriptions = new CopyOnWriteArrayList<>();
-    private final ObjectMapper objectMapper;
+    private final JsonMapper objectMapper;
     private final FolloweeLookup followeeLookup;
     private final Supplier<SseEmitter> emitterFactory;
 
     @Autowired
-    public FeedSseService(ObjectMapper objectMapper, FolloweeLookup followeeLookup) {
+    public FeedSseService(JsonMapper objectMapper, FolloweeLookup followeeLookup) {
         this(objectMapper, followeeLookup, () -> new SseEmitter(Long.MAX_VALUE));
     }
 
-    FeedSseService(ObjectMapper objectMapper, FolloweeLookup followeeLookup, Supplier<SseEmitter> emitterFactory) {
+    FeedSseService(JsonMapper objectMapper, FolloweeLookup followeeLookup, Supplier<SseEmitter> emitterFactory) {
         this.objectMapper = objectMapper;
         this.followeeLookup = followeeLookup;
         this.emitterFactory = emitterFactory;
@@ -164,7 +165,7 @@ public class FeedSseService {
         String json;
         try {
             json = objectMapper.writeValueAsString(payload);
-        } catch (IOException e) {
+        } catch (JacksonException e) {
             log.error("Cannot serialize SSE payload for post {}", payload.postId(), e);
             return;
         }

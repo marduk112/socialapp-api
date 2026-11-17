@@ -17,13 +17,13 @@ import com.socialapp.shared.events.UserUnfollowedEvent;
 import com.socialapp.shared.events.UserUpdatedEvent;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
-import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
+import org.springframework.boot.jdbc.test.autoconfigure.AutoConfigureTestDatabase;
+import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
-import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.postgresql.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
@@ -49,7 +49,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class NotificationPostgresTest {
 
     @Container
-    static final PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine");
+    static final PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:16-alpine");
 
     @DynamicPropertySource
     static void props(DynamicPropertyRegistry registry) {
@@ -68,7 +68,7 @@ class NotificationPostgresTest {
     @Autowired NotificationService service;
     @Autowired ActorProfileProjection profiles;
     @Autowired JdbcTemplate jdbc;
-    @Autowired org.springframework.boot.test.autoconfigure.orm.jpa.TestEntityManager em;
+    @Autowired org.springframework.boot.jpa.test.autoconfigure.TestEntityManager em;
 
     private static Instant t(int seconds) {
         return T0.plusSeconds(seconds);

@@ -1,6 +1,5 @@
 package com.socialapp.notification.infrastructure.sse;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.socialapp.notification.application.NotificationView;
 import com.socialapp.notification.infrastructure.web.NotificationResponse;
 import lombok.extern.slf4j.Slf4j;
@@ -10,6 +9,8 @@ import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.io.IOException;
 import java.util.List;
@@ -36,15 +37,15 @@ public class NotificationSseService {
     public static final String EVENT_NOTIFICATION = "notification";
 
     private final Map<UUID, Set<SseEmitter>> streams = new ConcurrentHashMap<>();
-    private final ObjectMapper objectMapper;
+    private final JsonMapper objectMapper;
     private final Supplier<SseEmitter> emitterFactory;
 
     @Autowired
-    public NotificationSseService(ObjectMapper objectMapper) {
+    public NotificationSseService(JsonMapper objectMapper) {
         this(objectMapper, () -> new SseEmitter(Long.MAX_VALUE));
     }
 
-    NotificationSseService(ObjectMapper objectMapper, Supplier<SseEmitter> emitterFactory) {
+    NotificationSseService(JsonMapper objectMapper, Supplier<SseEmitter> emitterFactory) {
         this.objectMapper = objectMapper;
         this.emitterFactory = emitterFactory;
     }
@@ -79,7 +80,7 @@ public class NotificationSseService {
         String json;
         try {
             json = objectMapper.writeValueAsString(NotificationResponse.from(notification));
-        } catch (IOException e) {
+        } catch (JacksonException e) {
             log.error("Cannot serialize notification {}", notification.id(), e);
             return;
         }

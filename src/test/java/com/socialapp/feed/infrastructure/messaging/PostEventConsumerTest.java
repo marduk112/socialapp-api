@@ -1,12 +1,13 @@
 package com.socialapp.feed.infrastructure.messaging;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.socialapp.feed.application.usecase.PostService;
 import com.socialapp.feed.domain.*;
 import com.socialapp.feed.infrastructure.sse.FeedSseService;
 import com.socialapp.shared.events.PostCreatedEvent;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.util.Collection;
 import java.util.List;
@@ -159,7 +160,7 @@ class PostEventConsumerTest {
         verifyNoInteractions(reactions);
 
         // JSON shape: pre-2C names kept (postId), new fields present, nested original has REST names (id)
-        var json = new ObjectMapper().findAndRegisterModules().valueToTree(payload);
+        JsonNode json = JsonMapper.builderWithJackson2Defaults().build().valueToTree(payload);
         assertThat(json.get("postId").asText()).isEqualTo(repost.getId().toString());
         assertThat(json.get("type").asText()).isEqualTo("REPOST");
         assertThat(json.get("originalAuthorId").asText()).isEqualTo(BOB.toString());

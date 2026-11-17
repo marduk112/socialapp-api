@@ -1,5 +1,6 @@
 package com.socialapp.config;
 
+import com.socialapp.config.outbox.DomainEventCodec;
 import com.socialapp.shared.events.*;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
@@ -20,8 +21,8 @@ import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
 import org.springframework.kafka.listener.DefaultErrorHandler;
 import org.springframework.kafka.support.serializer.DelegatingByTypeSerializer;
 import org.springframework.kafka.support.serializer.ErrorHandlingDeserializer;
-import org.springframework.kafka.support.serializer.JsonDeserializer;
-import org.springframework.kafka.support.serializer.JsonSerializer;
+import org.springframework.kafka.support.serializer.JacksonJsonDeserializer;
+import org.springframework.kafka.support.serializer.JacksonJsonSerializer;
 import org.springframework.util.backoff.FixedBackOff;
 
 import java.util.HashMap;
@@ -119,12 +120,14 @@ public class KafkaConfig {
     }
 
     // ── Producer ──────────────────────────────────────────────────────────────
+    // Value serializers are instances built on DomainEventCodec.wireMapper() (Jackson 3 configured to write the same
+    // bytes as the Jackson 2 JsonSerializer used before Spring Boot 4), so the outbox payload is the wire JSON. They are
+    // configured with setters, hence no spring.json.* properties in these maps (a serializer configured by setters
+    // rejects them).
     private Map<String, Object> producerProps() {
         Map<String, Object> props = new HashMap<>();
         props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
         props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
-        props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, JsonSerializer.class);
-        props.put(JsonSerializer.ADD_TYPE_INFO_HEADERS, false);
         props.put(ProducerConfig.ACKS_CONFIG, "all");
         props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
         // Fail a send within app.outbox.send-timeout-ms instead of Kafka's defaults (60s blocking on metadata,
@@ -137,9 +140,16 @@ public class KafkaConfig {
         return props;
     }
 
+    /** JSON value serializer of events and dead letters: no type headers, {@link DomainEventCodec#wireMapper()}. */
+    public static <T> JacksonJsonSerializer<T> eventSerializer() {
+        var json = new JacksonJsonSerializer<T>(DomainEventCodec.wireMapper());
+        json.setAddTypeInfo(false);
+        return json;
+    }
+
     @Bean
     public ProducerFactory<String, DomainEvent> producerFactory() {
-        return new DefaultKafkaProducerFactory<>(producerProps());
+        return new DefaultKafkaProducerFactory<>(producerProps(), new StringSerializer(), eventSerializer());
     }
 
     @Bean
@@ -172,15 +182,11 @@ public class KafkaConfig {
     public DefaultKafkaProducerFactory<Object, Object> deadLetterProducerFactory() {
         Map<Class<?>, Serializer<?>> valueSerializers = new LinkedHashMap<>();
         valueSerializers.put(byte[].class, new ByteArraySerializer());
-        var json = new JsonSerializer<>();
-        json.setAddTypeInfo(false);
-        valueSerializers.put(Object.class, json);
+        valueSerializers.put(Object.class, eventSerializer());
 
-        // The delegating serializer forwards configs to its delegates; a JsonSerializer configured via
-        // setters rejects JSON config properties, so they must not be present here.
+        // The delegating serializer forwards configs to its delegates; a JSON serializer configured via
+        // setters rejects JSON config properties, so producerProps() has none.
         Map<String, Object> props = producerProps();
-        props.remove(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG);
-        props.remove(JsonSerializer.ADD_TYPE_INFO_HEADERS);
         return new DefaultKafkaProducerFactory<>(props,
                 objectSerializer(new StringSerializer()),
                 new DelegatingByTypeSerializer(valueSerializers, true));
@@ -201,10 +207,13 @@ public class KafkaConfig {
         // ErrorHandlingDeserializer turns a malformed payload into a DeserializationException handled
         // by the error handler (-> DLT) instead of an endless poll/fail loop on the same offset.
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ErrorHandlingDeserializer.class);
-        props.put(ErrorHandlingDeserializer.VALUE_DESERIALIZER_CLASS, JsonDeserializer.class);
-        props.put(JsonDeserializer.TRUSTED_PACKAGES, "com.socialapp.*");
-        props.put(JsonDeserializer.VALUE_DEFAULT_TYPE, type.getName());
-        props.put(JsonDeserializer.USE_TYPE_INFO_HEADERS, false);
+        // JacksonJsonDeserializer = Spring Kafka 4's Jackson 3 successor of JsonDeserializer (same spring.json.*
+        // properties). Its default mapper ignores unknown properties and reads both the decimal and the ISO form of
+        // occurredAt, so events written before any later field addition still deserialize.
+        props.put(ErrorHandlingDeserializer.VALUE_DESERIALIZER_CLASS, JacksonJsonDeserializer.class);
+        props.put(JacksonJsonDeserializer.TRUSTED_PACKAGES, "com.socialapp.*");
+        props.put(JacksonJsonDeserializer.VALUE_DEFAULT_TYPE, type.getName());
+        props.put(JacksonJsonDeserializer.USE_TYPE_INFO_HEADERS, false);
 
         var factory = new ConcurrentKafkaListenerContainerFactory<String, T>();
         factory.setConsumerFactory(new DefaultKafkaConsumerFactory<>(props));

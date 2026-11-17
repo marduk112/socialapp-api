@@ -1,7 +1,5 @@
 package com.socialapp.usermanagement.infrastructure.web;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.socialapp.config.security.SecurityConfig;
 import com.socialapp.shared.domain.ConflictException;
 import com.socialapp.shared.security.AuthenticatedUser;
@@ -15,13 +13,15 @@ import com.socialapp.usermanagement.domain.User;
 import com.socialapp.usermanagement.infrastructure.security.JwtService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.util.UUID;
 
@@ -40,7 +40,7 @@ class UserControllerSecurityTest {
 
     @Autowired MockMvc mvc;
     @Autowired JwtService jwtService;
-    @Autowired ObjectMapper objectMapper;
+    @Autowired JsonMapper objectMapper;
 
     @MockitoBean UserService userService;
     @MockitoBean SocialGraphService socialGraphService;
@@ -66,7 +66,7 @@ class UserControllerSecurityTest {
                 .andReturn().getResponse().getContentAsString();
 
         JsonNode json = objectMapper.readTree(body);
-        assertThat(jwtService.parse(json.get("token").asText()))
+        assertThat(jwtService.parse(json.get("token").asString()))
                 .contains(new AuthenticatedUser(alice.getId(), "alice"));
     }
 

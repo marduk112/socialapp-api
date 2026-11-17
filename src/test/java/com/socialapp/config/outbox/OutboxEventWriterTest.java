@@ -1,14 +1,13 @@
 package com.socialapp.config.outbox;
 
+import com.socialapp.config.KafkaConfig;
 import com.socialapp.shared.events.*;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
-import org.springframework.kafka.support.serializer.JsonSerializer;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -116,13 +115,12 @@ class OutboxEventWriterTest {
     }
 
     /**
-     * The relay sends {@code codec.fromJson(payload)} through the same JsonSerializer as before, so the
+     * The relay sends {@code codec.fromJson(payload)} through the producer's JSON serializer, so the
      * bytes on the wire must equal those of the original event (eventId, occurredAt with nanos, type id).
      */
     @Test
     void roundTripThroughTheOutboxKeepsTheWireBytesIdentical() {
-        try (var wire = new JsonSerializer<DomainEvent>()) {
-            wire.configure(Map.of(JsonSerializer.ADD_TYPE_INFO_HEADERS, false), false); // as in KafkaConfig
+        try (var wire = KafkaConfig.<DomainEvent>eventSerializer()) { // the producer's value serializer
             var events = new java.util.ArrayList<>(allEventTypes());
             events.add(new UserUpdatedEvent(UUID.randomUUID(), Instant.parse("2026-01-02T03:04:05.123456789Z"),
                     USER, "n", null, null));

@@ -1,6 +1,5 @@
 package com.socialapp.config.security;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.socialapp.usermanagement.infrastructure.security.JwtService;
 import jakarta.servlet.DispatcherType;
 import org.springframework.beans.factory.annotation.Value;
@@ -17,6 +16,7 @@ import org.springframework.security.web.authentication.AnonymousAuthenticationFi
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.util.List;
 
@@ -39,7 +39,7 @@ public class SecurityConfig {
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http,
                                                    JwtService jwtService,
-                                                   ObjectMapper objectMapper) throws Exception {
+                                                   JsonMapper objectMapper) throws Exception {
         var jsonErrors = new JsonAuthenticationEntryPoint(objectMapper);
 
         http

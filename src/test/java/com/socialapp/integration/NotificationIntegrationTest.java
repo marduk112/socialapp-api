@@ -13,9 +13,9 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
-import org.testcontainers.containers.KafkaContainer;
-import org.testcontainers.containers.Neo4jContainer;
-import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.kafka.ConfluentKafkaContainer;
+import org.testcontainers.neo4j.Neo4jContainer;
+import org.testcontainers.postgresql.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
@@ -50,15 +50,16 @@ import static org.awaitility.Awaitility.await;
 class NotificationIntegrationTest {
 
     @Container
-    static final PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine")
+    static final PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:16-alpine")
             .withDatabaseName("socialapp_test").withUsername("test").withPassword("test");
 
     @Container
-    static final Neo4jContainer<?> neo4j = new Neo4jContainer<>("neo4j:5.18")
+    static final Neo4jContainer neo4j = new Neo4jContainer("neo4j:5.18")
             .withAdminPassword("testpassword").withoutAuthentication();
 
     @Container
-    static final KafkaContainer kafka = new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.0"));
+    static final ConfluentKafkaContainer kafka = new ConfluentKafkaContainer(
+            DockerImageName.parse("confluentinc/cp-kafka:7.6.0"));
 
     @DynamicPropertySource
     static void configureProperties(DynamicPropertyRegistry registry) {
