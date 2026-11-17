@@ -1,5 +1,8 @@
 # socialapp-api
 
+[![CI](https://github.com/marduk112/socialapp-api/actions/workflows/ci.yml/badge.svg)](https://github.com/marduk112/socialapp-api/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Spring Boot backend of [SocialApp](https://github.com/marduk112/SocialApp): a social network built around **hexagonal architecture, DDD and event-driven design** with polyglot persistence.
 
 - **Java 25, Spring Boot 4.1** (Spring Framework 7, Security 7, Data 2025.1)
