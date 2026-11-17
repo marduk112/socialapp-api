@@ -65,6 +65,17 @@ class PostTextIndexBackfillPostgresTest {
     private static final UUID CAROL = UUID.randomUUID();
     private static final UUID DAVE = UUID.randomUUID(); // a registered user WITHOUT a Feed author profile
 
+    /**
+     * Own threads for the tests that run things concurrently: ForkJoinPool.commonPool() has (cores - 1) threads, so on a
+     * 2-core CI runner tasks that block (lock holders) starve the others and the test deadlocks.
+     */
+    private final java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newCachedThreadPool();
+
+    @org.junit.jupiter.api.AfterEach
+    void shutDownPool() {
+        pool.shutdownNow();
+    }
+
     @Autowired PostService postService;
     @Autowired PostRepository posts;
     @Autowired PostHashtagRepository hashtags;
@@ -203,8 +214,8 @@ class PostTextIndexBackfillPostgresTest {
         List<UUID> ids = new ArrayList<>();
         for (int i = 0; i < 60; i++) ids.add(legacy(i % 2 == 0 ? ALICE : CAROL, "#common #n" + i + " @bob"));
 
-        var a = CompletableFuture.supplyAsync(() -> backfill(2).run(() -> false));
-        var b = CompletableFuture.supplyAsync(() -> backfill(2).run(() -> false));
+        var a = CompletableFuture.supplyAsync(() -> backfill(2).run(() -> false), pool);
+        var b = CompletableFuture.supplyAsync(() -> backfill(2).run(() -> false), pool);
         StartupBackfill.Outcome oa = a.join(), ob = b.join(); // no exception (e.g. no duplicate-key violation)
 
         assertThat(oa.items() + ob.items()).isEqualTo(60); // advisory lock + shared cursor: each post exactly once
@@ -230,15 +241,15 @@ class PostTextIndexBackfillPostgresTest {
             posts.findByIdForUpdate(waitsForLock).orElseThrow();
             locked.countDown();
             await(release);
-        }));
+        }), pool);
         var edit = CompletableFuture.runAsync(() -> tx.executeWithoutResult(s -> {
             postService.updatePost(editedMeanwhile, ALICE, "#edited", null);
             locked.countDown();
             await(release);
-        }));
+        }), pool);
         assertThat(locked.await(10, TimeUnit.SECONDS)).isTrue();
 
-        var run = CompletableFuture.supplyAsync(() -> backfill(10).run(() -> false));
+        var run = CompletableFuture.supplyAsync(() -> backfill(10).run(() -> false), pool);
         // Everything else is indexed without waiting; the run then waits for the two locks only.
         org.awaitility.Awaitility.await().atMost(java.time.Duration.ofSeconds(10))
                 .until(() -> jdbc.queryForObject("SELECT count(*) FROM post_hashtags WHERE tag LIKE 'other%'", Long.class) == 4);
