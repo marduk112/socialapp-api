@@ -50,9 +50,9 @@ public class UserPersistenceAdapter implements UserRepository {
     }
 
     @Override
-    public List<User> searchByUsername(String term, int limit) {
+    public List<User> searchByUsername(String term, UUID viewerId, int limit) {
         String exact = term.toLowerCase(Locale.ROOT);
         String escaped = exact.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
-        return jpaRepository.search(exact, escaped + "%", "%" + escaped + "%", limit);
+        return jpaRepository.search(exact, escaped + "%", "%" + escaped + "%", viewerId, limit);
     }
 }

@@ -31,7 +31,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 /** Web slice of the bookmark endpoints (stage 3B): real security chain, services and domain, mocked ports. */
 @WebMvcTest(controllers = PostController.class)
 @Import({SecurityConfig.class, JwtService.class, PostService.class, TimelineService.class, BookmarkService.class,
-        ValidationConfig.class})
+        com.socialapp.feed.application.usecase.PostVisibility.class, ValidationConfig.class})
 class BookmarkControllerTest {
 
     private static final UUID ALICE = UUID.randomUUID();
@@ -51,6 +51,7 @@ class BookmarkControllerTest {
     @MockitoBean FeedSseService feedSseService;
     @MockitoBean PostMediaRepository postMediaRepository;
     @MockitoBean com.socialapp.feed.application.media.MediaStorage mediaStorage;
+    @MockitoBean com.socialapp.feed.domain.BlockMuteRepository blockMuteRepository;
 
     private String bearer(UUID userId) {
         return "Bearer " + jwtService.issueToken(userId, "user");
@@ -68,7 +69,7 @@ class BookmarkControllerTest {
     @Test
     void putIs204AndBookmarksForThePrincipalOnly() throws Exception {
         var post = Post.create(BOB, "bob", "hi", null);
-        when(postRepository.existsById(post.getId())).thenReturn(true);
+        when(postRepository.findById(post.getId())).thenReturn(Optional.of(post));
 
         mvc.perform(put("/api/v1/posts/{id}/bookmark", post.getId())
                         .param("userId", BOB.toString()) // ignored
@@ -80,7 +81,7 @@ class BookmarkControllerTest {
 
     @Test
     void putOnAMissingPostIs404() throws Exception {
-        when(postRepository.existsById(any())).thenReturn(false);
+        when(postRepository.findById(any())).thenReturn(Optional.empty());
 
         mvc.perform(put("/api/v1/posts/{id}/bookmark", UUID.randomUUID()).header(HttpHeaders.AUTHORIZATION, bearer(ALICE)))
                 .andExpect(status().isNotFound())
@@ -159,7 +160,7 @@ class BookmarkControllerTest {
     void bookmarkedFlagIsInFeedAndSinglePost_batchLookedUpOncePerPage() throws Exception {
         var p1 = Post.create(BOB, "bob", "one", null);
         var p2 = Post.create(BOB, "bob", "two", null);
-        when(postRepository.findPageAfter(any(), any(), anyInt())).thenReturn(List.of(p1, p2));
+        when(postRepository.findPageAfter(any(), any(), any(), anyInt())).thenReturn(List.of(p1, p2));
         when(postRepository.findById(p1.getId())).thenReturn(Optional.of(p1));
         when(bookmarkRepository.findBookmarkedPostIds(any(), any())).thenReturn(List.of(p2.getId()))
                 .thenReturn(List.of(p1.getId()));

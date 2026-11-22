@@ -26,18 +26,18 @@ class TimelineServiceTest {
 
     @Test
     void emptyTimelineHasNoNextCursor() {
-        when(posts.findPageAfter(any(), any(), anyInt())).thenReturn(List.of());
+        when(posts.findPageAfter(any(), any(), any(), anyInt())).thenReturn(List.of());
 
         var page = service.page(VIEWER, FeedScope.ALL, null, 20);
 
         assertThat(page.posts()).isEmpty();
         assertThat(page.next()).isNull();
-        verify(posts).findPageAfter(FeedCursor.START.createdAt(), FeedCursor.START.id(), 21);
+        verify(posts).findPageAfter(VIEWER, FeedCursor.START.createdAt(), FeedCursor.START.id(), 21);
     }
 
     @Test
     void exactlyOneFullPageLeftHasNoNextCursor() {
-        when(posts.findPageAfter(any(), any(), anyInt())).thenReturn(posts(3));
+        when(posts.findPageAfter(any(), any(), any(), anyInt())).thenReturn(posts(3));
 
         var page = service.page(VIEWER, FeedScope.ALL, FeedCursor.START, 3);
 
@@ -48,7 +48,7 @@ class TimelineServiceTest {
     @Test
     void morePostsThanSizeYieldCursorOfLastReturnedPost() {
         var rows = posts(4);
-        when(posts.findPageAfter(any(), any(), anyInt())).thenReturn(rows);
+        when(posts.findPageAfter(any(), any(), any(), anyInt())).thenReturn(rows);
 
         var page = service.page(VIEWER, FeedScope.ALL, FeedCursor.START, 3);
 
@@ -64,15 +64,15 @@ class TimelineServiceTest {
         service.page(VIEWER, FeedScope.FOLLOWING, cursor, 5);
 
         verify(posts).findFollowingPageAfter(VIEWER, cursor.createdAt(), cursor.id(), 6);
-        verify(posts, never()).findPageAfter(any(), any(), anyInt());
+        verify(posts, never()).findPageAfter(any(), any(), any(), anyInt());
     }
 
     @Test
     void sizeIsClampedToMaxAndMustBePositive() {
-        when(posts.findPageAfter(any(), any(), anyInt())).thenReturn(List.of());
+        when(posts.findPageAfter(any(), any(), any(), anyInt())).thenReturn(List.of());
 
         service.page(VIEWER, FeedScope.ALL, null, 5000);
-        verify(posts).findPageAfter(any(), any(), eq(TimelineService.MAX_SIZE + 1));
+        verify(posts).findPageAfter(any(), any(), any(), eq(TimelineService.MAX_SIZE + 1));
 
         assertThatThrownBy(() -> service.page(VIEWER, FeedScope.ALL, null, 0))
                 .isInstanceOf(IllegalArgumentException.class);

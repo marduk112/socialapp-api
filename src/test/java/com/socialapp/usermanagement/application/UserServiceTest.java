@@ -22,6 +22,7 @@ import static org.mockito.Mockito.*;
 /** Pure unit tests for UserService (no Spring context, no infrastructure). */
 class UserServiceTest {
 
+    private static final UUID VIEWER = UUID.randomUUID();
     private final UserRepository repo = mock(UserRepository.class);
     private final UserService service = new UserService(repo);
 
@@ -89,21 +90,21 @@ class UserServiceTest {
 
     @Test
     void searchTrimsTheTermAndClampsTheLimit() {
-        when(repo.searchByUsername(anyString(), anyInt())).thenReturn(java.util.List.of());
+        when(repo.searchByUsername(anyString(), any(), anyInt())).thenReturn(java.util.List.of());
 
-        service.searchByUsername("  Ali  ", 1000);
-        service.searchByUsername("ali", 0);
+        service.searchByUsername("  Ali  ", VIEWER, 1000);
+        service.searchByUsername("ali", VIEWER, 0);
 
-        verify(repo).searchByUsername("Ali", UserService.MAX_SEARCH_LIMIT);
-        verify(repo).searchByUsername("ali", 1);
+        verify(repo).searchByUsername("Ali", VIEWER, UserService.MAX_SEARCH_LIMIT);
+        verify(repo).searchByUsername("ali", VIEWER, 1);
     }
 
     @Test
     void searchRejectsBlankAndOverlongTermsWithoutTouchingTheRepository() {
-        assertThatThrownBy(() -> service.searchByUsername("  ", 10)).isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> service.searchByUsername(null, 10)).isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> service.searchByUsername("x".repeat(UserService.MAX_SEARCH_TERM_LENGTH + 1), 10))
+        assertThatThrownBy(() -> service.searchByUsername("  ", VIEWER, 10)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> service.searchByUsername(null, VIEWER, 10)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> service.searchByUsername("x".repeat(UserService.MAX_SEARCH_TERM_LENGTH + 1), VIEWER, 10))
                 .isInstanceOf(IllegalArgumentException.class);
-        verify(repo, never()).searchByUsername(anyString(), anyInt());
+        verify(repo, never()).searchByUsername(anyString(), any(), anyInt());
     }
 }

@@ -51,6 +51,7 @@ class NotificationControllerSecurityTest {
     @MockitoBean NotificationQueries queries;
     @MockitoBean NotificationCutoff cutoff;
     @MockitoBean NotificationSseService sseService;
+    @MockitoBean com.socialapp.notification.application.ActorRestrictions restrictions;
 
     private String bearer(UUID user) {
         return "Bearer " + jwtService.issueToken(user, "u");

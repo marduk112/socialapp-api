@@ -51,7 +51,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @Testcontainers(disabledWithoutDocker = true)
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
-@Import({PostService.class, TimelineService.class, JdbcPostHashtagRepository.class, JdbcPostMentionRepository.class,
+@Import({PostService.class, BlockMuteAdapters.class, TimelineService.class, JdbcPostHashtagRepository.class, JdbcPostMentionRepository.class,
         RepostPostgresTest.StatementCounting.class, com.socialapp.feed.infrastructure.media.MediaAdapters.class})
 class RepostPostgresTest {
 
@@ -291,7 +291,7 @@ class RepostPostgresTest {
         // even a (never written by the app) tag row for a repost does not surface it
         hashtags.replace(repost.getId(), List.of(tag));
 
-        var ids = timeline.hashtagPage(tag, null, 20).posts().stream().map(Post::getId).toList();
+        var ids = timeline.hashtagPage(java.util.UUID.randomUUID(), tag, null, 20).posts().stream().map(Post::getId).toList();
 
         assertThat(ids).containsExactly(quote.getId(), original.getId());
     }

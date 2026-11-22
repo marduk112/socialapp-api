@@ -1,12 +1,15 @@
 package com.socialapp.feed.application.usecase;
 
 import com.socialapp.feed.application.timeline.FeedCursor;
+import com.socialapp.feed.domain.BlockMuteRepository;
 import com.socialapp.feed.domain.BookmarkRepository;
+import com.socialapp.feed.domain.Post;
 import com.socialapp.feed.domain.PostRepository;
 import com.socialapp.shared.domain.NotFoundException;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -20,12 +23,14 @@ class BookmarkServiceTest {
 
     private final BookmarkRepository bookmarks = mock(BookmarkRepository.class);
     private final PostRepository posts = mock(PostRepository.class);
-    private final BookmarkService service = new BookmarkService(bookmarks, posts);
+    private final BlockMuteRepository blockMutes = mock(BlockMuteRepository.class);
+    private final BookmarkService service = new BookmarkService(bookmarks, posts, new PostVisibility(blockMutes, posts));
 
     @Test
     void bookmarkingAnExistingPostInsertsIdempotently_andRepeatingIsFine() {
-        var postId = UUID.randomUUID();
-        when(posts.existsById(postId)).thenReturn(true);
+        var post = Post.create(UUID.randomUUID(), "bob", "hi", null);
+        var postId = post.getId();
+        when(posts.findById(postId)).thenReturn(Optional.of(post));
 
         service.bookmark(ALICE, postId);
         service.bookmark(ALICE, postId);
@@ -35,7 +40,7 @@ class BookmarkServiceTest {
 
     @Test
     void bookmarkingAMissingPostIsNotFound_andWritesNothing() {
-        when(posts.existsById(any())).thenReturn(false);
+        when(posts.findById(any())).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> service.bookmark(ALICE, UUID.randomUUID())).isInstanceOf(NotFoundException.class);
         verify(bookmarks, never()).add(any(), any());

@@ -1,6 +1,7 @@
 package com.socialapp.notification.infrastructure.persistence;
 
 import com.socialapp.notification.application.ActorProfileProjection;
+import com.socialapp.notification.application.ActorRestrictionProjection;
 import com.socialapp.notification.application.NotificationCursor;
 import com.socialapp.notification.application.NotificationService;
 import com.socialapp.notification.application.NotificationView;
@@ -11,7 +12,11 @@ import com.socialapp.shared.events.ReactionEvent;
 import com.socialapp.shared.events.ReactionEvent.ReactionAction;
 import com.socialapp.shared.events.ReactionEvent.ReactionTarget;
 import com.socialapp.shared.events.ReactionEvent.ReactionType;
+import com.socialapp.shared.events.UserBlockedEvent;
 import com.socialapp.shared.events.UserCreatedEvent;
+import com.socialapp.shared.events.UserMutedEvent;
+import com.socialapp.shared.events.UserUnblockedEvent;
+import com.socialapp.shared.events.UserUnmutedEvent;
 import com.socialapp.shared.events.UserFollowedEvent;
 import com.socialapp.shared.events.UserUnfollowedEvent;
 import com.socialapp.shared.events.UserUpdatedEvent;
@@ -44,7 +49,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @DataJpaTest
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @Testcontainers(disabledWithoutDocker = true)
-@Import({NotificationService.class, ActorProfileProjection.class, JdbcNotificationQueries.class,
+@Import({NotificationService.class, JdbcActorRestrictions.class, ActorRestrictionProjection.class, ActorProfileProjection.class, JdbcNotificationQueries.class,
         JdbcNotificationCutoff.class})
 class NotificationPostgresTest {
 
@@ -67,6 +72,7 @@ class NotificationPostgresTest {
 
     @Autowired NotificationService service;
     @Autowired ActorProfileProjection profiles;
+    @Autowired ActorRestrictionProjection restrictions;
     @Autowired JdbcTemplate jdbc;
     @Autowired org.springframework.boot.jpa.test.autoconfigure.TestEntityManager em;
 
@@ -285,5 +291,103 @@ class NotificationPostgresTest {
         service.markRead(bob, null); // idempotent
         assertThat(service.unreadCount(bob)).isZero();
         assertThat(service.unreadCount(carol)).isEqualTo(1);
+    }
+
+    // ── Blocks and mutes (stage 5A) ─────────────────────────────────────────
+
+    private List<NotificationView> mention(UUID author, UUID mentioned, Instant at) {
+        return service.on(new PostCreatedEvent(UUID.randomUUID(), at, UUID.randomUUID(), author, "a", "hi @x", null,
+                "POST", null, null, null, List.of(mentioned)));
+    }
+
+    @Test
+    void aBlockInEitherDirectionStopsNewNotifications_hidesExistingOnes_andUnblockShowsThemAgain() {
+        UUID post = UUID.randomUUID();
+        assertThat(service.on(new UserFollowedEvent(UUID.randomUUID(), t(1), bob, alice))).hasSize(1);
+        assertThat(mention(carol, alice, t(2))).hasSize(1);
+        assertThat(service.unreadCount(alice)).isEqualTo(2);
+
+        // alice blocks bob: bob's existing FOLLOW disappears from list and count, new actions notify nobody
+        restrictions.on(new UserBlockedEvent(UUID.randomUUID(), t(3), alice, bob));
+        assertThat(all(alice)).extracting(NotificationView::actorId).containsExactly(carol);
+        assertThat(service.unreadCount(alice)).isEqualTo(1);
+        assertThat(service.on(like(post, alice, bob, ReactionAction.ADDED, t(4)))).isEmpty();
+        assertThat(mention(bob, alice, t(5))).isEmpty();
+        // ...and in the other direction (alice acting towards the user she blocked)
+        assertThat(service.on(new UserFollowedEvent(UUID.randomUUID(), t(6), alice, bob))).isEmpty();
+        assertThat(all(bob)).isEmpty();
+
+        restrictions.on(new UserUnblockedEvent(UUID.randomUUID(), t(7), alice, bob));
+        assertThat(all(alice)).extracting(NotificationView::actorId).containsExactly(carol, bob); // the old FOLLOW is back
+        assertThat(service.unreadCount(alice)).isEqualTo(2);
+        // what happened during the block was never recorded
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM notifications WHERE recipient_id = ? AND actor_id = ?",
+                Long.class, alice, bob)).isEqualTo(1);
+        assertThat(service.on(like(post, alice, bob, ReactionAction.ADDED, t(8)))).hasSize(1);
+    }
+
+    @Test
+    void aMuteIsOneDirectional_andUndoneByUnmute() {
+        assertThat(mention(bob, alice, t(1))).hasSize(1);
+        restrictions.on(new UserMutedEvent(UUID.randomUUID(), t(2), alice, bob));
+
+        assertThat(all(alice)).isEmpty();
+        assertThat(service.unreadCount(alice)).isZero();
+        assertThat(mention(bob, alice, t(3))).isEmpty();               // muted actor: nothing new
+        assertThat(mention(alice, bob, t(4))).hasSize(1);              // bob still hears from alice
+        assertThat(service.on(new UserFollowedEvent(UUID.randomUUID(), t(5), alice, bob))).hasSize(1);
+
+        restrictions.on(new UserUnmutedEvent(UUID.randomUUID(), t(6), alice, bob));
+        assertThat(all(alice)).hasSize(1);
+        assertThat(mention(bob, alice, t(7))).hasSize(1);
+    }
+
+    @Test
+    void retractionsStillApplyDuringABlock_soAnUndoneLikeDoesNotComeBack() {
+        UUID post = UUID.randomUUID();
+        assertThat(service.on(like(post, alice, bob, ReactionAction.ADDED, t(1)))).hasSize(1);
+        restrictions.on(new UserBlockedEvent(UUID.randomUUID(), t(2), bob, alice));
+        service.on(like(post, alice, bob, ReactionAction.REMOVED, t(3)));
+
+        restrictions.on(new UserUnblockedEvent(UUID.randomUUID(), t(4), bob, alice));
+        assertThat(all(alice)).isEmpty();
+    }
+
+    @Test
+    void restrictionProjectionIsIdempotentAndOrderTolerant() {
+        mention(bob, alice, t(1));
+        var unblock = new UserUnblockedEvent(UUID.randomUUID(), t(11), alice, bob);
+        var block = new UserBlockedEvent(UUID.randomUUID(), t(10), alice, bob);
+
+        assertThat(restrictions.on(unblock)).isTrue();
+        assertThat(restrictions.on(block)).isFalse(); // older: cannot resurrect the block
+        assertThat(restrictions.on(unblock)).isFalse();
+        assertThat(all(alice)).hasSize(1);
+        assertThat(restrictions.on(new UserMutedEvent(UUID.randomUUID(), t(12), alice, bob))).isTrue();
+        assertThat(restrictions.on(new UserUnmutedEvent(UUID.randomUUID(), t(9), alice, bob))).isFalse();
+        assertThat(all(alice)).isEmpty();
+        assertThat(restrictions.on(new UserBlockedEvent(UUID.randomUUID(), t(13), alice, alice))).isFalse();
+    }
+
+    @Test
+    void pagesStayExactWhenNotificationsAreHidden() {
+        List<UUID> visible = new ArrayList<>();
+        for (int i = 0; i < 6; i++) {
+            visible.add(mention(carol, alice, t(10 + 2 * i)).get(0).id());
+            mention(bob, alice, t(11 + 2 * i));
+        }
+        restrictions.on(new UserMutedEvent(UUID.randomUUID(), t(100), alice, bob));
+        em.flush();
+
+        List<UUID> seen = new ArrayList<>();
+        NotificationCursor cursor = null;
+        do {
+            var page = service.page(alice, cursor, 4);
+            assertThat(page.items().size()).isLessThanOrEqualTo(4);
+            if (page.next() != null) assertThat(page.items()).hasSize(4);
+            page.items().forEach(n -> seen.add(n.id()));
+            cursor = page.next() == null ? null : NotificationCursor.decode(page.next().encode());
+        } while (cursor != null);
+        assertThat(seen).containsExactlyElementsOf(visible.reversed());
     }
 }

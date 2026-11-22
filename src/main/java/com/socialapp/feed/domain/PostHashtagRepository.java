@@ -21,7 +21,8 @@ public interface PostHashtagRepository {
     /**
      * Hashtags of posts created at or after {@code since}, most used first: by distinct authors (so one account
      * repeating a tag cannot dominate), then by posts, then by tag; at most {@code limit}. ONE aggregate query over
-     * {@code ix_post_hashtags_created} (V25).
+     * {@code ix_post_hashtags_created} (V25). Posts of authors hidden from {@code viewerId} (blocked either way or
+     * muted, stage 5A) are not counted at all.
      */
-    List<TrendingHashtag> trending(Instant since, int limit);
+    List<TrendingHashtag> trending(UUID viewerId, Instant since, int limit);
 }

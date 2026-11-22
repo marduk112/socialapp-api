@@ -261,7 +261,7 @@ class TimelinePostgresTest {
     }
 
     private List<UUID> search(String q) {
-        return timeline.searchPage(q, null, 100).posts().stream().map(Post::getId).toList();
+        return timeline.searchPage(ALICE, q, null, 100).posts().stream().map(Post::getId).toList();
     }
 
     @Test
@@ -312,7 +312,7 @@ class TimelinePostgresTest {
         List<UUID> seen = new ArrayList<>();
         FeedCursor cursor = null;
         for (int i = 0; i < 20; i++) {
-            var page = timeline.searchPage("kafka", cursor == null ? null : FeedCursor.decode(cursor.encode()), 3);
+            var page = timeline.searchPage(ALICE, "kafka", cursor == null ? null : FeedCursor.decode(cursor.encode()), 3);
             page.posts().forEach(p -> seen.add(p.getId()));
             if (page.next() == null) break;
             assertThat(page.posts()).hasSize(3);
@@ -323,15 +323,15 @@ class TimelinePostgresTest {
 
     @Test
     void searchRejectsBlankOrOverlongQueriesAndBadSizes() {
-        org.assertj.core.api.Assertions.assertThatThrownBy(() -> timeline.searchPage("   ", null, 20))
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> timeline.searchPage(ALICE, "   ", null, 20))
                 .isInstanceOf(IllegalArgumentException.class);
-        org.assertj.core.api.Assertions.assertThatThrownBy(() -> timeline.searchPage(null, null, 20))
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> timeline.searchPage(ALICE, null, null, 20))
                 .isInstanceOf(IllegalArgumentException.class);
         org.assertj.core.api.Assertions.assertThatThrownBy(
-                        () -> timeline.searchPage("x".repeat(TimelineService.MAX_QUERY_LENGTH + 1), null, 20))
+                        () -> timeline.searchPage(ALICE, "x".repeat(TimelineService.MAX_QUERY_LENGTH + 1), null, 20))
                 .isInstanceOf(IllegalArgumentException.class);
-        org.assertj.core.api.Assertions.assertThatThrownBy(() -> timeline.searchPage("kafka", null, 0))
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> timeline.searchPage(ALICE, "kafka", null, 0))
                 .isInstanceOf(IllegalArgumentException.class);
-        assertThat(timeline.searchPage("x".repeat(TimelineService.MAX_QUERY_LENGTH), null, 20).posts()).isEmpty();
+        assertThat(timeline.searchPage(ALICE, "x".repeat(TimelineService.MAX_QUERY_LENGTH), null, 20).posts()).isEmpty();
     }
 }

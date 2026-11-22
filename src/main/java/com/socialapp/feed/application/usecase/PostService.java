@@ -29,6 +29,7 @@ public class PostService {
     private final BookmarkRepository bookmarkRepository;
     private final PostMediaRepository mediaRepository;
     private final MediaStorage mediaStorage;
+    private final PostVisibility visibility;
 
     // ── Posts CRUD ──────────────────────────────────────────────────────────────
 
@@ -51,6 +52,18 @@ public class PostService {
     @Transactional(readOnly = true)
     public Post findById(UUID id) {
         return postRepository.findById(id).orElseThrow(() -> postNotFound(id));
+    }
+
+    /**
+     * The post as {@code viewerId} may open it: 404 also when its author (or, for a REPOST item, the original's author)
+     * blocks the viewer or is blocked by them (stage 5A) - indistinguishable from a deleted post. Mutes never hide an
+     * explicitly opened post.
+     */
+    @Transactional(readOnly = true)
+    public Post findVisibleById(UUID id, UUID viewerId) {
+        var post = findById(id);
+        visibility.ensureNotBlocked(post, viewerId);
+        return post;
     }
 
     /**
@@ -100,7 +113,7 @@ public class PostService {
      */
     @Transactional
     public RepostResult repost(UUID targetId, UUID authorId, String authorUsername) {
-        var original = lockTarget(targetId);
+        var original = lockTarget(targetId, authorId);
         var existing = postRepository.findRepost(authorId, original.getId());
         if (existing.isPresent()) return new RepostResult(existing.get(), false);
         var repost = Post.repost(authorId, currentUsername(authorId, authorUsername), original);
@@ -138,7 +151,7 @@ public class PostService {
     @Transactional
     public Post quote(UUID targetId, UUID authorId, String authorUsername, String comment, List<UUID> mediaIds) {
         validateMediaIds(mediaIds); // cheap checks before taking the original's lock
-        var original = lockTarget(targetId);
+        var original = lockTarget(targetId, authorId);
         var media = lockAttachable(mediaIds, authorId);
         var quote = Post.quote(authorId, currentUsername(authorId, authorUsername), original, comment);
         return attach(saveWithTextIndex(quote), media, authorId);
@@ -158,12 +171,18 @@ public class PostService {
     /**
      * Resolves the post a repost/quote of {@code targetId} must point at (a REPOST item -> its original) and locks
      * its row. The item itself is read without a lock: locking a repost row and then its original would invert
-     * the lock order of {@link #deletePost} (original, then its reposts) and could deadlock.
+     * the lock order of {@link #deletePost} (original, then its reposts) and could deadlock. A block between
+     * {@code actorId} and the item's or the original's author -> 404 (stage 5A), like an unknown post.
      */
-    private Post lockTarget(UUID targetId) {
+    private Post lockTarget(UUID targetId, UUID actorId) {
         var item = postRepository.findById(targetId).orElseThrow(() -> postNotFound(targetId));
         var originalId = item.repostTargetId().orElseThrow(() -> postNotFound(targetId));
-        return postRepository.findByIdForUpdate(originalId).orElseThrow(() -> postNotFound(targetId));
+        var original = postRepository.findByIdForUpdate(originalId).orElseThrow(() -> postNotFound(targetId));
+        var authors = new HashSet<>(List.of(item.getAuthorId(), original.getAuthorId()));
+        if (visibility.anyBlocked(actorId, authors)) {
+            throw postNotFound(targetId);
+        }
+        return original;
     }
 
     // ── Read model ─────────────────────────────────────────────────────────────
@@ -171,11 +190,14 @@ public class PostService {
     /**
      * The posts as seen by {@code viewerId} (null = nobody, e.g. an SSE broadcast), in the given order, with
      * author avatar, hashtags, mentions, repost/quote counters, the viewer's repost flag, bookmark flag and reaction, and the
-     * embedded original of reposts/quotes (see {@link PostView#original()}).
+     * embedded original of reposts/quotes (see {@link PostView#original()}). An embedded original or quoted post whose
+     * author blocks the viewer or is blocked by them is left out as "unavailable" ({@link PostView#originalHidden()},
+     * stage 5A); the posts themselves are expected to be visible already (list queries filter them).
      *
      * <p>Constant number of queries regardless of the number of posts: at most two for the originals (the
      * embedded originals, then the quoted posts of reposted quotes), then one IN query each for avatars,
-     * hashtags, mentions, media, repost/quote counts and - with a viewer - reposted flags, bookmarks and reactions, all
+     * hashtags, mentions, media, repost/quote counts and - with a viewer - blocked authors of embedded posts (only if
+     * there are any), reposted flags, bookmarks and reactions, all
      * covering the page posts and their originals together. No N+1. Media URLs are built from the rows only (no file
      * access), so a missing file never breaks a list.
      */
@@ -198,6 +220,12 @@ public class PostService {
 
         var all = List.copyOf(byId.values());
         var ids = all.stream().map(Post::getId).toList();
+        // Stage 5A: an embedded original (or quoted post) by someone blocked either way is shown as "unavailable".
+        var embeddedIds = all.stream().filter(Post::embedsOriginal).map(Post::getOriginalPostId)
+                .filter(Objects::nonNull).collect(Collectors.toSet());
+        var embeddedAuthors = all.stream().filter(p -> embeddedIds.contains(p.getId())).map(Post::getAuthorId)
+                .collect(Collectors.toSet());
+        Set<UUID> blockedAuthors = visibility.blockedAmong(viewerId, embeddedAuthors);
         var avatars = getAuthorAvatarUrls(all.stream().map(Post::getAuthorId).collect(Collectors.toSet()));
         var hashtags = hashtagRepository.findByPostIds(ids);
         var mentions = mentionRepository.findByPostIds(ids);
@@ -225,20 +253,23 @@ public class PostService {
             }
         }
 
+        java.util.function.Predicate<Post> hidden = o -> o != null && blockedAuthors.contains(o.getAuthorId());
         java.util.function.BiFunction<Post, PostView, PostView> view = (p, original) -> {
             var c = counts.getOrDefault(p.getId(), new long[2]);
+            boolean originalHidden = original == null && p.embedsOriginal()
+                    && hidden.test(byId.get(p.getOriginalPostId()));
             return new PostView(p, avatars.get(p.getAuthorId()),
                     hashtags.getOrDefault(p.getId(), List.of()),
                     mentions.getOrDefault(p.getId(), List.of()),
                     c[0], c[1], reposted.contains(p.getId()), bookmarked.contains(p.getId()), reactions.get(p.getId()), original,
-                    media.getOrDefault(p.getId(), List.of()));
+                    media.getOrDefault(p.getId(), List.of()), originalHidden);
         };
         return posts.stream().map(p -> {
             var original = p.embedsOriginal() ? byId.get(p.getOriginalPostId()) : null;
-            if (original == null) return view.apply(p, null);
+            if (original == null || hidden.test(original)) return view.apply(p, null);
             var quoted = p.isRepost() && original.getType() == PostType.QUOTE
                     ? byId.get(original.getOriginalPostId()) : null;
-            var quotedView = quoted == null ? null : view.apply(quoted, null);
+            var quotedView = quoted == null || hidden.test(quoted) ? null : view.apply(quoted, null);
             return view.apply(p, view.apply(original, quotedView));
         }).toList();
     }
@@ -280,6 +311,7 @@ public class PostService {
     @Transactional
     public Post react(UUID postId, UUID userId, ReactionEvent.ReactionType type, boolean add) {
         var post = postRepository.findByIdForUpdate(postId).orElseThrow(() -> postNotFound(postId));
+        if (add) visibility.ensureNotBlocked(post, userId); // removing an old reaction stays possible
 
         var existing = reactionRepository.findByPostIdAndUserId(postId, userId);
         var change = post.react(userId, typesOf(existing, PostReaction::getReactionType), type, add);
@@ -301,11 +333,15 @@ public class PostService {
         // Lock order is always post -> comment (same as deleteComment) to avoid deadlocks.
         // The post lock is needed for commentsCount and turns a missing post into a 404, not an FK error.
         var post = postRepository.findByIdForUpdate(postId).orElseThrow(() -> postNotFound(postId));
+        visibility.ensureNotBlocked(post, authorId);
         Comment parent = null;
         if (parentCommentId != null) {
             // Locked so a concurrent delete of the parent cannot slip in between check and insert.
             parent = commentRepository.findByIdForUpdate(parentCommentId)
                     .orElseThrow(() -> new NotFoundException("Parent comment not found: " + parentCommentId));
+            if (visibility.anyBlocked(authorId, Set.of(parent.getAuthorId()))) {
+                throw new NotFoundException("Parent comment not found: " + parentCommentId);
+            }
         }
         // Rejects a parent of another post (400); registers CommentCreatedEvent (published on save via the outbox).
         var comment = Comment.create(post, parent, authorId, currentUsername(authorId, authorUsername), content);
@@ -317,10 +353,16 @@ public class PostService {
         return commentRepository.save(comment);
     }
 
+    /**
+     * One page (offset {@code page * size}) of the post's comments, oldest first, as {@code viewerId} sees them: a post
+     * hidden by a block -> 404, comments by users blocked either way are left out (in SQL, so pages stay exact; mutes
+     * do not hide comments). An unknown post gives an empty list (unchanged behaviour).
+     */
     @Transactional(readOnly = true)
-    public List<Comment> getComments(UUID postId, int page, int size) {
-        return commentRepository.findByPostIdOrderByCreatedAtAsc(postId,
-                PageRequest.of(page, size)).getContent();
+    public List<Comment> getComments(UUID postId, UUID viewerId, int page, int size) {
+        var pageable = PageRequest.of(page, size); // validates page >= 0, size >= 1 (400 otherwise)
+        postRepository.findById(postId).ifPresent(post -> visibility.ensureNotBlocked(post, viewerId));
+        return commentRepository.findVisiblePage(postId, viewerId, pageable.getPageSize(), pageable.getOffset());
     }
 
     @Transactional
@@ -350,6 +392,12 @@ public class PostService {
     @Transactional
     public Comment reactToComment(UUID commentId, UUID userId, ReactionEvent.ReactionType type, boolean add) {
         var comment = commentRepository.findByIdForUpdate(commentId).orElseThrow(() -> commentNotFound(commentId));
+        if (add) { // a comment of a blocked user, or on a post of one, is "not found" (stage 5A)
+            var authors = new HashSet<UUID>();
+            authors.add(comment.getAuthorId());
+            postRepository.findById(comment.getPostId()).ifPresent(p -> authors.add(p.getAuthorId()));
+            if (visibility.anyBlocked(userId, authors)) throw commentNotFound(commentId);
+        }
 
         var existing = commentReactionRepository.findByCommentIdAndUserId(commentId, userId);
         var change = comment.react(userId, typesOf(existing, CommentReaction::getReactionType), type, add);
@@ -427,6 +475,7 @@ public class PostService {
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────
+
 
     /**
      * Saves the post and (re)writes its hashtags and resolved mentions in the same transaction. The post is

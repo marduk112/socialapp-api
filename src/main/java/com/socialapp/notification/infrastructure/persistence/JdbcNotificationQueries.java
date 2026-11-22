@@ -21,7 +21,9 @@ import java.util.UUID;
 /**
  * JDBC read side of notifications (V20). Actor display data comes from Notification's own
  * {@code notification_actor_profiles} by a LEFT JOIN in the same query (no N+1); the name carried by the event is
- * the fallback. Runs in the caller's JPA transaction (same connection).
+ * the fallback. Runs in the caller's JPA transaction (same connection). Stage 5A: list, unread count and the SSE re-read
+ * skip notifications whose actor the recipient blocks, is blocked by or mutes ({@code JdbcActorRestrictions#NOT_SUPPRESSED},
+ * in SQL, so keyset pages stay exact). "Mark all read" deliberately still covers them.
  */
 @Repository
 @RequiredArgsConstructor
@@ -54,6 +56,8 @@ class JdbcNotificationQueries implements NotificationQueries {
         return jdbc.query(SELECT + """
                 WHERE n.recipient_id = :recipientId AND NOT n.retracted
                   AND (n.created_at, n.id) < (:createdAt, :id)
+                  AND """ + JdbcActorRestrictions.NOT_SUPPRESSED + """
+
                 ORDER BY n.created_at DESC, n.id DESC
                 LIMIT :limit""", new MapSqlParameterSource()
                 .addValue("recipientId", recipientId)
@@ -67,14 +71,17 @@ class JdbcNotificationQueries implements NotificationQueries {
         if (ids.isEmpty()) return List.of();
         return jdbc.query(SELECT + """
                 WHERE n.id IN (:ids) AND NOT n.retracted
+                  AND """ + JdbcActorRestrictions.NOT_SUPPRESSED + """
+
                 ORDER BY n.created_at, n.id""", new MapSqlParameterSource("ids", Set.copyOf(ids)), ROW);
     }
 
     @Override
     public long countUnread(UUID recipientId) {
         Long count = jdbc.queryForObject("""
-                SELECT count(*) FROM notifications
-                WHERE recipient_id = :recipientId AND read_at IS NULL AND NOT retracted""",
+                SELECT count(*) FROM notifications n
+                WHERE n.recipient_id = :recipientId AND n.read_at IS NULL AND NOT n.retracted
+                  AND """ + JdbcActorRestrictions.NOT_SUPPRESSED,
                 new MapSqlParameterSource("recipientId", recipientId), Long.class);
         return count == null ? 0 : count;
     }

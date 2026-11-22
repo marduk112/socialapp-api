@@ -28,6 +28,8 @@ import java.util.UUID;
  *   <li>{@code originalPostId}, {@code originalAuthorUsername}, {@code originalContent}: legacy flat fields kept
  *       for compatibility (snapshot taken when the repost/quote was created); {@code originalAuthorId} is the
  *       current original's author (null when it is gone).</li>
+ *   <li>Stage 5A: when the original's author blocks the viewer or is blocked by them, {@code original},
+ *       {@code originalAuthorId} and the three legacy fields are null, exactly as for a deleted original.</li>
  *   <li>{@code media}: the post's own images {@code [{id, url, width, height}]} ordered by position, {@code []} when
  *       none (always for a REPOST: its original's images are in {@code original.media}). Stage 3C, appended last.</li>
  * </ul>
@@ -49,11 +51,13 @@ public record PostResponse(
         if (view == null) return null;
         Post p = view.post();
         var original = from(view.original());
+        boolean hidden = view.originalHidden(); // stage 5A: no trace of a blocked user's post, like a deleted one
         return new PostResponse(
                 p.getId(), p.getAuthorId(), p.getAuthorUsername(), view.authorAvatarUrl(),
                 p.getContent(), p.getImageUrl(),
                 p.getLikesCount(), p.getDislikesCount(), p.getCommentsCount(),
-                p.getOriginalPostId(), p.getOriginalAuthorUsername(), p.getOriginalContent(),
+                hidden ? null : p.getOriginalPostId(), hidden ? null : p.getOriginalAuthorUsername(),
+                hidden ? null : p.getOriginalContent(),
                 p.getCreatedAt(), p.getUpdatedAt(),
                 view.hashtags(), view.mentions(),
                 p.getType(), original == null ? null : original.authorId(),
@@ -62,5 +66,15 @@ public record PostResponse(
                 original,
                 view.media()
         );
+    }
+
+    /**
+     * This post without its embedded original and the legacy snapshot fields ("unavailable"), for a viewer who must
+     * not see the original (stage 5A, SSE variant of {@link PostView#originalHidden()}).
+     */
+    public PostResponse withoutOriginal() {
+        return new PostResponse(id, authorId, authorUsername, authorAvatarUrl, content, imageUrl, likesCount,
+                dislikesCount, commentsCount, null, null, null, createdAt, updatedAt, hashtags, mentions, type, null,
+                repostsCount, quotesCount, viewerReposted, bookmarked, userReaction, null, media);
     }
 }

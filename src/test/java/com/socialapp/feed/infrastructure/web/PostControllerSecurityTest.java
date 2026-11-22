@@ -7,6 +7,7 @@ import com.socialapp.feed.application.timeline.FeedScope;
 import com.socialapp.feed.application.timeline.TimelineService;
 import com.socialapp.feed.application.usecase.BookmarkService;
 import com.socialapp.feed.application.usecase.PostService;
+import com.socialapp.feed.application.usecase.PostVisibility;
 import com.socialapp.feed.domain.*;
 import com.socialapp.feed.infrastructure.sse.FeedSseService;
 import com.socialapp.usermanagement.infrastructure.security.JwtService;
@@ -46,7 +47,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  */
 @WebMvcTest(controllers = PostController.class)
 @Import({SecurityConfig.class, JwtService.class, PostService.class, TimelineService.class, BookmarkService.class,
-        ValidationConfig.class})
+        PostVisibility.class, ValidationConfig.class})
 class PostControllerSecurityTest {
 
     private static final UUID ALICE = UUID.randomUUID();
@@ -67,6 +68,7 @@ class PostControllerSecurityTest {
     @MockitoBean FeedSseService feedSseService;
     @MockitoBean PostMediaRepository postMediaRepository;
     @MockitoBean com.socialapp.feed.application.media.MediaStorage mediaStorage;
+    @MockitoBean BlockMuteRepository blockMuteRepository;
 
     private String bearer(UUID userId, String username) {
         return "Bearer " + jwtService.issueToken(userId, username);
@@ -108,7 +110,7 @@ class PostControllerSecurityTest {
     @Test
     void validTokenIsAccepted() throws Exception {
         var post = Post.create(ALICE, "alice", "hello", null);
-        when(postRepository.findPageAfter(any(), any(), anyInt())).thenReturn(List.of(post));
+        when(postRepository.findPageAfter(any(), any(), any(), anyInt())).thenReturn(List.of(post));
 
         mvc.perform(get("/api/v1/feed").header(HttpHeaders.AUTHORIZATION, bearer(BOB, "bob")))
                 .andExpect(status().isOk())
@@ -120,7 +122,7 @@ class PostControllerSecurityTest {
     @Test
     void feedDefaultsToScopeAllFirstPageSize20_andLastPageHasNullCursor() throws Exception {
         var post = Post.create(ALICE, "alice", "hello", null);
-        when(postRepository.findPageAfter(any(), any(), anyInt())).thenReturn(List.of(post));
+        when(postRepository.findPageAfter(any(), any(), any(), anyInt())).thenReturn(List.of(post));
 
         mvc.perform(get("/api/v1/feed").header(HttpHeaders.AUTHORIZATION, bearer(BOB, "bob")))
                 .andExpect(status().isOk())
@@ -130,7 +132,7 @@ class PostControllerSecurityTest {
                 .andExpect(jsonPath("$.nextCursor").value(org.hamcrest.Matchers.nullValue()))
                 .andExpect(jsonPath("$.nextCursor").hasJsonPath());
 
-        verify(postRepository).findPageAfter(FeedCursor.START.createdAt(), FeedCursor.START.id(), 21);
+        verify(postRepository).findPageAfter(BOB, FeedCursor.START.createdAt(), FeedCursor.START.id(), 21);
         verify(postRepository, never()).findFollowingPageAfter(any(), any(), any(), anyInt());
     }
 
@@ -139,7 +141,7 @@ class PostControllerSecurityTest {
         var p1 = Post.create(ALICE, "alice", "1", null);
         var p2 = Post.create(ALICE, "alice", "2", null);
         var p3 = Post.create(ALICE, "alice", "3", null);
-        when(postRepository.findPageAfter(any(), any(), anyInt())).thenReturn(List.of(p1, p2, p3));
+        when(postRepository.findPageAfter(any(), any(), any(), anyInt())).thenReturn(List.of(p1, p2, p3));
 
         var body = mvc.perform(get("/api/v1/feed").param("size", "2")
                         .header(HttpHeaders.AUTHORIZATION, bearer(BOB, "bob")))
@@ -153,7 +155,7 @@ class PostControllerSecurityTest {
         mvc.perform(get("/api/v1/feed").param("size", "2").param("cursor", cursor)
                         .header(HttpHeaders.AUTHORIZATION, bearer(BOB, "bob")))
                 .andExpect(status().isOk());
-        verify(postRepository).findPageAfter(p2.getCreatedAt(), p2.getId(), 3);
+        verify(postRepository).findPageAfter(BOB, p2.getCreatedAt(), p2.getId(), 3);
     }
 
     @Test
@@ -167,18 +169,18 @@ class PostControllerSecurityTest {
                 .andExpect(jsonPath("$.nextCursor").value(org.hamcrest.Matchers.nullValue()));
 
         verify(postRepository).findFollowingPageAfter(BOB, FeedCursor.START.createdAt(), FeedCursor.START.id(), 21);
-        verify(postRepository, never()).findPageAfter(any(), any(), anyInt());
+        verify(postRepository, never()).findPageAfter(any(), any(), any(), anyInt());
     }
 
     @Test
     void sizeAboveMaxIsClampedTo100() throws Exception {
-        when(postRepository.findPageAfter(any(), any(), anyInt())).thenReturn(List.of());
+        when(postRepository.findPageAfter(any(), any(), any(), anyInt())).thenReturn(List.of());
 
         mvc.perform(get("/api/v1/feed").param("size", "1000")
                         .header(HttpHeaders.AUTHORIZATION, bearer(BOB, "bob")))
                 .andExpect(status().isOk());
 
-        verify(postRepository).findPageAfter(any(), any(), org.mockito.ArgumentMatchers.eq(101));
+        verify(postRepository).findPageAfter(any(), any(), any(), org.mockito.ArgumentMatchers.eq(101));
     }
 
     @Test
@@ -201,13 +203,13 @@ class PostControllerSecurityTest {
 
     @Test
     void oldPageParamIsIgnored() throws Exception {
-        when(postRepository.findPageAfter(any(), any(), anyInt())).thenReturn(List.of());
+        when(postRepository.findPageAfter(any(), any(), any(), anyInt())).thenReturn(List.of());
 
         mvc.perform(get("/api/v1/feed").param("page", "3")
                         .header(HttpHeaders.AUTHORIZATION, bearer(BOB, "bob")))
                 .andExpect(status().isOk());
 
-        verify(postRepository).findPageAfter(FeedCursor.START.createdAt(), FeedCursor.START.id(), 21);
+        verify(postRepository).findPageAfter(BOB, FeedCursor.START.createdAt(), FeedCursor.START.id(), 21);
     }
 
     // ── SSE query-param token ─────────────────────────────────────────────────
@@ -389,7 +391,7 @@ class PostControllerSecurityTest {
     @Test
     void hashtagTimelineNormalisesTheTag_returnsEnvelopeWithTagsAndMentions() throws Exception {
         var post = Post.create(ALICE, "alice", "#Hello @bob", null);
-        when(postRepository.findHashtagPageAfter(any(), any(), any(), anyInt())).thenReturn(List.of(post));
+        when(postRepository.findHashtagPageAfter(any(), any(), any(), any(), anyInt())).thenReturn(List.of(post));
         when(postHashtagRepository.findByPostIds(any())).thenReturn(java.util.Map.of(post.getId(), List.of("hello")));
         when(postMentionRepository.findByPostIds(any()))
                 .thenReturn(java.util.Map.of(post.getId(), List.of(new Mention(BOB, "bob"))));
@@ -403,7 +405,7 @@ class PostControllerSecurityTest {
                 .andExpect(jsonPath("$.nextCursor").value(org.hamcrest.Matchers.nullValue()))
                 .andExpect(jsonPath("$.nextCursor").hasJsonPath());
 
-        verify(postRepository).findHashtagPageAfter("hello", FeedCursor.START.createdAt(), FeedCursor.START.id(), 21);
+        verify(postRepository).findHashtagPageAfter("hello", BOB, FeedCursor.START.createdAt(), FeedCursor.START.id(), 21);
     }
 
     @Test
@@ -411,7 +413,7 @@ class PostControllerSecurityTest {
         var p1 = Post.create(ALICE, "alice", "#t 1", null);
         var p2 = Post.create(ALICE, "alice", "#t 2", null);
         var p3 = Post.create(ALICE, "alice", "#t 3", null);
-        when(postRepository.findHashtagPageAfter(any(), any(), any(), anyInt())).thenReturn(List.of(p1, p2, p3));
+        when(postRepository.findHashtagPageAfter(any(), any(), any(), any(), anyInt())).thenReturn(List.of(p1, p2, p3));
 
         var body = mvc.perform(get("/api/v1/hashtags/t/posts").param("size", "2")
                         .header(HttpHeaders.AUTHORIZATION, bearer(BOB, "bob")))
@@ -424,12 +426,12 @@ class PostControllerSecurityTest {
         mvc.perform(get("/api/v1/hashtags/t/posts").param("cursor", cursor).param("size", "500")
                         .header(HttpHeaders.AUTHORIZATION, bearer(BOB, "bob")))
                 .andExpect(status().isOk());
-        verify(postRepository).findHashtagPageAfter("t", p2.getCreatedAt(), p2.getId(), 101);
+        verify(postRepository).findHashtagPageAfter("t", BOB, p2.getCreatedAt(), p2.getId(), 101);
     }
 
     @Test
     void unknownHashtagIsAnEmptyPage() throws Exception {
-        when(postRepository.findHashtagPageAfter(any(), any(), any(), anyInt())).thenReturn(List.of());
+        when(postRepository.findHashtagPageAfter(any(), any(), any(), any(), anyInt())).thenReturn(List.of());
 
         mvc.perform(get("/api/v1/hashtags/{tag}/posts", "nobodyusesthis")
                         .header(HttpHeaders.AUTHORIZATION, bearer(BOB, "bob")))
@@ -462,7 +464,7 @@ class PostControllerSecurityTest {
         var p1 = Post.create(ALICE, "alice", "#a", null);
         var p2 = Post.create(BOB, "bob", "#b @alice", null);
         var p3 = Post.create(ALICE, "alice", "plain", null);
-        when(postRepository.findPageAfter(any(), any(), anyInt())).thenReturn(List.of(p1, p2, p3));
+        when(postRepository.findPageAfter(any(), any(), any(), anyInt())).thenReturn(List.of(p1, p2, p3));
         when(postHashtagRepository.findByPostIds(any())).thenReturn(java.util.Map.of(
                 p1.getId(), List.of("a"), p2.getId(), List.of("b")));
         when(postMentionRepository.findByPostIds(any())).thenReturn(java.util.Map.of(
@@ -757,8 +759,8 @@ class PostControllerSecurityTest {
     void everyPostEndpointCarriesTheNewFields() throws Exception {
         var post = stored(Post.create(ALICE, "alice", "plain", null));
         when(postRepository.save(any(Post.class))).thenAnswer(inv -> inv.getArgument(0));
-        when(postRepository.findPageAfter(any(), any(), anyInt())).thenReturn(List.of(post));
-        when(postRepository.findHashtagPageAfter(any(), any(), any(), anyInt())).thenReturn(List.of(post));
+        when(postRepository.findPageAfter(any(), any(), any(), anyInt())).thenReturn(List.of(post));
+        when(postRepository.findHashtagPageAfter(any(), any(), any(), any(), anyInt())).thenReturn(List.of(post));
         when(postReactionRepository.findByUserIdAndPostIdIn(eq(BOB), any()))
                 .thenReturn(List.of(PostReaction.of(post.getId(), BOB, com.socialapp.shared.events.ReactionEvent.ReactionType.LIKE)));
 

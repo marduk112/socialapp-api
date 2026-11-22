@@ -20,13 +20,25 @@ import java.util.List;
  *                       original (the quote) carries the quoted post as a second level (whose original is null).
  * @param media          the post's own images ordered by position (a REPOST has none; its original's are in
  *                       {@code original}); never null
+ * @param originalHidden the original exists but its author blocks the viewer or is blocked by them (stage 5A):
+ *                       {@code original} is null and the API also drops the snapshot fields, exactly like a deleted
+ *                       original ("unavailable")
  */
 public record PostView(Post post, String authorAvatarUrl, List<String> hashtags, List<Mention> mentions,
                        long repostsCount, long quotesCount, boolean viewerReposted, boolean bookmarked,
-                       ReactionEvent.ReactionType userReaction, PostView original, List<MediaView> media) {
+                       ReactionEvent.ReactionType userReaction, PostView original, List<MediaView> media,
+                       boolean originalHidden) {
     public PostView {
         hashtags = List.copyOf(hashtags);
         mentions = List.copyOf(mentions);
         media = media == null ? List.of() : List.copyOf(media);
+    }
+
+    /** Pre-5A shape (original never hidden). */
+    public PostView(Post post, String authorAvatarUrl, List<String> hashtags, List<Mention> mentions,
+                    long repostsCount, long quotesCount, boolean viewerReposted, boolean bookmarked,
+                    ReactionEvent.ReactionType userReaction, PostView original, List<MediaView> media) {
+        this(post, authorAvatarUrl, hashtags, mentions, repostsCount, quotesCount, viewerReposted, bookmarked,
+                userReaction, original, media, false);
     }
 }

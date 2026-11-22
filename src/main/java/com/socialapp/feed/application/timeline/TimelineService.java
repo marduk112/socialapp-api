@@ -21,6 +21,10 @@ import java.util.UUID;
  *
  * <p>{@link FeedScope#FOLLOWING} uses Feed's {@code follows} projection (eventually consistent with the
  * social graph, typically within a second).
+ *
+ * <p>Stage 5A: every page is as seen by {@code viewerId}: posts of users the viewer blocks, is blocked by or mutes (and
+ * REPOSTs of their posts) are filtered in SQL, before the LIMIT ({@code PostRepository#LISTED_FOR_VIEWER}), so the
+ * cursor logic is unchanged and pages are never short or skipped.
  */
 @Service
 @RequiredArgsConstructor
@@ -42,7 +46,7 @@ public class TimelineService {
         var after = cursor == null ? FeedCursor.START : cursor;
 
         List<Post> rows = switch (scope == null ? FeedScope.ALL : scope) {
-            case ALL -> postRepository.findPageAfter(after.createdAt(), after.id(), pageSize + 1);
+            case ALL -> postRepository.findPageAfter(viewerId, after.createdAt(), after.id(), pageSize + 1);
             case FOLLOWING -> postRepository.findFollowingPageAfter(viewerId, after.createdAt(), after.id(),
                     pageSize + 1);
         };
@@ -56,12 +60,12 @@ public class TimelineService {
      * @throws IllegalArgumentException (400) for an invalid tag or {@code size < 1}
      */
     @Transactional(readOnly = true)
-    public FeedPage hashtagPage(String tag, FeedCursor cursor, int size) {
+    public FeedPage hashtagPage(UUID viewerId, String tag, FeedCursor cursor, int size) {
         String normalised = HashtagParser.normaliseQuery(tag);
         int pageSize = pageSize(size);
         var after = cursor == null ? FeedCursor.START : cursor;
-        return toPage(postRepository.findHashtagPageAfter(normalised, after.createdAt(), after.id(), pageSize + 1),
-                pageSize);
+        return toPage(postRepository.findHashtagPageAfter(normalised, viewerId, after.createdAt(), after.id(),
+                pageSize + 1), pageSize);
     }
 
     /**
@@ -71,7 +75,7 @@ public class TimelineService {
      * @throws IllegalArgumentException (400) for a blank/too long query or {@code size < 1}
      */
     @Transactional(readOnly = true)
-    public FeedPage searchPage(String query, FeedCursor cursor, int size) {
+    public FeedPage searchPage(UUID viewerId, String query, FeedCursor cursor, int size) {
         String q = query == null ? "" : query.trim();
         int length = q.codePointCount(0, q.length());
         if (length < 1 || length > MAX_QUERY_LENGTH) {
@@ -79,7 +83,8 @@ public class TimelineService {
         }
         int pageSize = pageSize(size);
         var after = cursor == null ? FeedCursor.START : cursor;
-        return toPage(postRepository.findSearchPageAfter(q, after.createdAt(), after.id(), pageSize + 1), pageSize);
+        return toPage(postRepository.findSearchPageAfter(q, viewerId, after.createdAt(), after.id(), pageSize + 1),
+                pageSize);
     }
 
     private static int pageSize(int size) {

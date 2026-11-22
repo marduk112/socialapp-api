@@ -2,7 +2,9 @@ package com.socialapp.usermanagement.infrastructure.web;
 
 import com.socialapp.usermanagement.application.usecase.UserService;
 import com.socialapp.usermanagement.domain.User;
+import com.socialapp.shared.security.AuthenticatedUser;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -22,13 +24,14 @@ public class UserSearchController {
     /**
      * People search by username (case-insensitive, anywhere in the name; exact match first, then prefix).
      * {@code q}: 1..50 characters, blank or too long -> 400; {@code limit}: default 10, clamped to 1..20.
-     * Public profile data only (no e-mail).
+     * Public profile data only (no e-mail). Users the caller blocks or is blocked by are never listed (stage 5A).
      */
     @GetMapping("/users")
     public ResponseEntity<List<UserSearchResult>> searchUsers(
+            @AuthenticationPrincipal AuthenticatedUser me,
             @RequestParam String q,
             @RequestParam(defaultValue = "" + UserService.DEFAULT_SEARCH_LIMIT) int limit) {
-        return ResponseEntity.ok(userService.searchByUsername(q, limit).stream()
+        return ResponseEntity.ok(userService.searchByUsername(q, me.id(), limit).stream()
                 .map(UserSearchResult::from).toList());
     }
 
