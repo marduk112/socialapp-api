@@ -3,7 +3,10 @@ package com.socialapp.socialgraph.application.usecase;
 import java.util.Collection;
 import java.util.List;
 
-/** Read side of "who to follow"; every candidate excludes the viewer and everyone the viewer already follows. */
+/**
+ * Read side of "who to follow"; every candidate excludes the viewer, everyone the viewer already follows, blocks or mutes,
+ * and everyone who blocks the viewer.
+ */
 public interface FollowSuggestionQueries {
 
     /** Friends of friends, most mutual followees first (ties: username, id). */

@@ -29,4 +29,17 @@ class UserNodeTest {
         assertThat(a).isEqualTo(renamed).hasSameHashCodeAs(renamed).isNotEqualTo(other);
         assertThat(new UserNode()).isNotEqualTo(new UserNode());
     }
+
+    @Test
+    void selfBlockAndSelfMuteAreRejected_othersAllowed() {
+        assertThatThrownBy(() -> UserNode.ensureCanRestrict("u1", "u1", "block"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("cannot block themselves");
+        assertThatThrownBy(() -> UserNode.ensureCanRestrict("u1", "u1", "mute"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("cannot mute themselves");
+        assertThatThrownBy(() -> UserNode.ensureCanRestrict(null, "u1", "block"))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatCode(() -> UserNode.ensureCanRestrict("u1", "u2", "block")).doesNotThrowAnyException();
+    }
 }

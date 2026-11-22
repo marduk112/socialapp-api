@@ -73,6 +73,59 @@ public class SocialGraphController {
         return ResponseEntity.ok(socialGraphService.isFollowing(follower, followeeId));
     }
 
+    // ── Blocks and mutes (stage 5A) ───────────────────────────────────────────
+
+    /** Blocks {@code userId} (mutual in effect, removes follows both ways). 204, idempotent; self -> 400; unknown -> 404. */
+    @PutMapping("/block/{userId}")
+    public ResponseEntity<Void> block(@AuthenticationPrincipal AuthenticatedUser me, @PathVariable UUID userId) {
+        socialGraphService.block(me.id(), userId);
+        return ResponseEntity.noContent().build();
+    }
+
+    /** Lifts the caller's block of {@code userId}. Always 204 (follows are not restored). */
+    @DeleteMapping("/block/{userId}")
+    public ResponseEntity<Void> unblock(@AuthenticationPrincipal AuthenticatedUser me, @PathVariable UUID userId) {
+        socialGraphService.unblock(me.id(), userId);
+        return ResponseEntity.noContent().build();
+    }
+
+    /** The caller's blocked users, by username. */
+    @GetMapping("/blocks")
+    public ResponseEntity<List<UserNodeResponse>> getBlocks(@AuthenticationPrincipal AuthenticatedUser me) {
+        return ResponseEntity.ok(socialGraphService.getBlocked(me.id()).stream().map(UserNodeResponse::from).toList());
+    }
+
+    /** Mutes {@code userId} (one-directional, silent). 204, idempotent; self -> 400; unknown -> 404. */
+    @PutMapping("/mute/{userId}")
+    public ResponseEntity<Void> mute(@AuthenticationPrincipal AuthenticatedUser me, @PathVariable UUID userId) {
+        socialGraphService.mute(me.id(), userId);
+        return ResponseEntity.noContent().build();
+    }
+
+    /** Unmutes {@code userId}. Always 204. */
+    @DeleteMapping("/mute/{userId}")
+    public ResponseEntity<Void> unmute(@AuthenticationPrincipal AuthenticatedUser me, @PathVariable UUID userId) {
+        socialGraphService.unmute(me.id(), userId);
+        return ResponseEntity.noContent().build();
+    }
+
+    /** The caller's muted users, by username. */
+    @GetMapping("/mutes")
+    public ResponseEntity<List<UserNodeResponse>> getMutes(@AuthenticationPrincipal AuthenticatedUser me) {
+        return ResponseEntity.ok(socialGraphService.getMuted(me.id()).stream().map(UserNodeResponse::from).toList());
+    }
+
+    /**
+     * The caller's relationship to {@code userId}: {@code {userId, following, followedBy, blocked, muted}} (blocked /
+     * muted = BY the caller). No "blocked by them" flag on purpose. Always 200 (unknown user or self: all false).
+     */
+    @GetMapping("/relationship/{userId}")
+    public ResponseEntity<RelationshipResponse> getRelationship(@AuthenticationPrincipal AuthenticatedUser me,
+                                                                @PathVariable UUID userId) {
+        var r = socialGraphService.getRelationship(me.id(), userId);
+        return ResponseEntity.ok(new RelationshipResponse(userId, r.following(), r.followedBy(), r.blocked(), r.muted()));
+    }
+
     private static UUID requireFollowee(FollowRequest request) {
         if (request == null || request.followeeId() == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "followeeId is required");
@@ -88,6 +141,8 @@ public class SocialGraphController {
             return new UserNodeResponse(node.getUserId(), node.getUsername(), node.getAvatarUrl());
         }
     }
+
+    record RelationshipResponse(UUID userId, boolean following, boolean followedBy, boolean blocked, boolean muted) {}
 
     record SuggestionResponse(String userId, String username, String avatarUrl, long mutualFollowers) {
         static SuggestionResponse from(FollowSuggestion s) {

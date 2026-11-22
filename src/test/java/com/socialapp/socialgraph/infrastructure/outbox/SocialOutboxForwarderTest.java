@@ -2,7 +2,11 @@ package com.socialapp.socialgraph.infrastructure.outbox;
 
 import com.socialapp.config.outbox.OutboxImporter;
 import com.socialapp.shared.events.DomainEvent;
+import com.socialapp.shared.events.UserBlockedEvent;
 import com.socialapp.shared.events.UserFollowedEvent;
+import com.socialapp.shared.events.UserMutedEvent;
+import com.socialapp.shared.events.UserUnblockedEvent;
+import com.socialapp.shared.events.UserUnmutedEvent;
 import com.socialapp.shared.events.UserUnfollowedEvent;
 import com.socialapp.socialgraph.infrastructure.outbox.SocialOutboxStore.PendingSocialEvent;
 import org.junit.jupiter.api.Test;
@@ -140,5 +144,23 @@ class SocialOutboxForwarderTest {
         forwarder.poll();
         assertThat(queuedWakeUps).hasSize(1);
         verify(store, times(1)).findPending(anyInt());
+    }
+
+    @Test
+    void blockAndMuteNodesBecomeTheirEvents() {
+        var id = UUID.randomUUID().toString();
+        var at = Instant.ofEpochMilli(42L);
+        var a = UUID.fromString(A);
+        var b = UUID.fromString(B);
+
+        assertThat(SocialOutboxForwarder.toEvent(new PendingSocialEvent(id, "UserBlockedEvent", A, B, 42L)))
+                .isEqualTo(new UserBlockedEvent(UUID.fromString(id), at, a, b));
+        assertThat(SocialOutboxForwarder.toEvent(new PendingSocialEvent(id, "UserUnblockedEvent", A, B, 42L)))
+                .isEqualTo(new UserUnblockedEvent(UUID.fromString(id), at, a, b));
+        assertThat(SocialOutboxForwarder.toEvent(new PendingSocialEvent(id, "UserMutedEvent", A, B, 42L)))
+                .isEqualTo(new UserMutedEvent(UUID.fromString(id), at, a, b));
+        assertThat(SocialOutboxForwarder.toEvent(new PendingSocialEvent(id, "UserUnmutedEvent", A, B, 42L)))
+                .isEqualTo(new UserUnmutedEvent(UUID.fromString(id), at, a, b));
+        assertThat(SocialOutboxForwarder.toEvent(new PendingSocialEvent(id, "UserBlockedEvent", A, null, 42L))).isNull();
     }
 }

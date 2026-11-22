@@ -10,14 +10,19 @@ import java.util.Map;
 
 /**
  * Access to the Neo4j side of SocialGraph's outbox: {@code :SocialOutbox} nodes, created by
- * {@code UserNodeRepository#follow/unfollow} in the same transaction as the graph change. Each statement
+ * {@code UserNodeRepository} (follow/unfollow, block/unblock, mute/unmute) in the same transaction as the graph change. Each statement
  * runs in its own auto-commit transaction (no Spring transaction is involved).
  */
 @Component
 public class SocialOutboxStore {
 
-    /** A pending event as recorded in Neo4j (raw values; validated by the forwarder). */
-    public record PendingSocialEvent(String eventId, String type, String followerId, String followeeId,
+    /**
+     * A pending event as recorded in Neo4j (raw values; validated by the forwarder). {@code sourceId} / {@code targetId}
+     * are the pair of the relationship: follower / followee for follow events (node properties {@code followerId} /
+     * {@code followeeId}), blocker / blocked and muter / muted for the stage 5A events (properties {@code sourceId} /
+     * {@code targetId}).
+     */
+    public record PendingSocialEvent(String eventId, String type, String sourceId, String targetId,
                                      Long occurredAt) {}
 
     private final Neo4jClient neo4j;
@@ -42,7 +47,8 @@ public class SocialOutboxStore {
                 .mappedBy((types, r) -> {
                     var o = r.get("o").asNode();
                     return new PendingSocialEvent(text(o.get("eventId")), text(o.get("type")),
-                            text(o.get("followerId")), text(o.get("followeeId")),
+                            o.containsKey("sourceId") ? text(o.get("sourceId")) : text(o.get("followerId")),
+                            o.containsKey("targetId") ? text(o.get("targetId")) : text(o.get("followeeId")),
                             o.get("occurredAt").asObject() instanceof Long at ? at : null);
                 })
                 .all());

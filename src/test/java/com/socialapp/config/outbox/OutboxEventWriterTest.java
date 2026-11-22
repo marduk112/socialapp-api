@@ -38,7 +38,11 @@ class OutboxEventWriterTest {
                 new UserUnfollowedEvent(UUID.randomUUID(), Instant.parse("2026-01-02T03:04:05.007Z"), USER, FOLLOWEE),
                 new CommentCreatedEvent(COMMENT, POST, FOLLOWEE, null, null, USER, "alice", "c"),
                 ReactionEvent.onComment(POST, COMMENT, FOLLOWEE, "c", USER, ReactionEvent.ReactionType.LIKE,
-                        ReactionEvent.ReactionAction.ADDED));
+                        ReactionEvent.ReactionAction.ADDED),
+                new UserBlockedEvent(UUID.randomUUID(), Instant.parse("2026-01-02T03:04:05.008Z"), USER, FOLLOWEE),
+                new UserUnblockedEvent(UUID.randomUUID(), Instant.parse("2026-01-02T03:04:05.009Z"), USER, FOLLOWEE),
+                new UserMutedEvent(UUID.randomUUID(), Instant.parse("2026-01-02T03:04:05.010Z"), USER, FOLLOWEE),
+                new UserUnmutedEvent(UUID.randomUUID(), Instant.parse("2026-01-02T03:04:05.011Z"), USER, FOLLOWEE));
     }
 
     @Test
@@ -54,7 +58,12 @@ class OutboxEventWriterTest {
                 new OutboxEventWriter.Route("Follow", "social-events", USER.toString()),
                 // stage 3A: comments keyed by their post; comment reactions on reaction-events, keyed by the post
                 new OutboxEventWriter.Route("Comment", "comment-events", POST.toString()),
-                new OutboxEventWriter.Route("Comment", "reaction-events", POST.toString()));
+                new OutboxEventWriter.Route("Comment", "reaction-events", POST.toString()),
+                // stage 5A: blocks/mutes on social-events keyed by the acting user (blocker / muter)
+                new OutboxEventWriter.Route("Block", "social-events", USER.toString()),
+                new OutboxEventWriter.Route("Block", "social-events", USER.toString()),
+                new OutboxEventWriter.Route("Mute", "social-events", USER.toString()),
+                new OutboxEventWriter.Route("Mute", "social-events", USER.toString()));
     }
 
     @Test

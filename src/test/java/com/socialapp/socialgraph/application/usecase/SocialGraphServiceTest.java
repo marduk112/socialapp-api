@@ -1,5 +1,6 @@
 package com.socialapp.socialgraph.application.usecase;
 
+import com.socialapp.shared.domain.ForbiddenOperationException;
 import com.socialapp.shared.domain.NotFoundException;
 import com.socialapp.shared.events.UserCreatedEvent;
 import com.socialapp.shared.events.UserUpdatedEvent;
@@ -148,5 +149,116 @@ class SocialGraphServiceTest {
 
         verify(suggestions).friendsOfFriends(me.toString(), SocialGraphService.MAX_SUGGESTIONS);
         verify(suggestions).friendsOfFriends(me.toString(), 1);
+    }
+
+    // ── Blocks and mutes (stage 5A) ─────────────────────────────────────────
+
+    @Test
+    void selfBlockAndSelfMuteAre400_beforeTouchingTheGraph() {
+        var me = UUID.randomUUID();
+
+        assertThatThrownBy(() -> service.block(me, me)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> service.mute(me, me)).isInstanceOf(IllegalArgumentException.class);
+        verifyNoInteractions(repo, events);
+    }
+
+    @Test
+    void blockingOrMutingAnUnknownUserIs404() {
+        var a = UUID.randomUUID();
+        var b = UUID.randomUUID();
+        when(repo.existsById(a.toString())).thenReturn(true);
+        when(repo.existsById(b.toString())).thenReturn(false);
+
+        assertThatThrownBy(() -> service.block(a, b)).isInstanceOf(NotFoundException.class);
+        assertThatThrownBy(() -> service.mute(a, b)).isInstanceOf(NotFoundException.class);
+        verify(repo, never()).block(anyString(), anyString(), anyString(), anyString(), anyString(), anyLong());
+        verify(repo, never()).mute(anyString(), anyString(), anyString(), anyLong());
+        verifyNoInteractions(events);
+    }
+
+    @Test
+    void blockIsIdempotent_onlyAChangeSignalsTheForwarder_withThreeDistinctEventIds() {
+        var a = UUID.randomUUID();
+        var b = UUID.randomUUID();
+        when(repo.existsById(anyString())).thenReturn(true);
+        when(repo.block(eq(a.toString()), eq(b.toString()), anyString(), anyString(), anyString(), anyLong()))
+                .thenReturn(Optional.of(1L), Optional.empty());
+
+        assertThat(service.block(a, b)).isTrue();
+        assertThat(service.block(a, b)).isFalse(); // already blocked: no-op
+
+        verify(events, times(1)).publishEvent(any(FollowGraphChanged.class));
+        var first = org.mockito.ArgumentCaptor.forClass(String.class);
+        var second = org.mockito.ArgumentCaptor.forClass(String.class);
+        var third = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(repo, times(2)).block(anyString(), anyString(), first.capture(), second.capture(), third.capture(),
+                anyLong());
+        assertThat(List.of(first.getValue(), second.getValue(), third.getValue())).doesNotHaveDuplicates();
+    }
+
+    @Test
+    void unblockAndUnmuteNeverValidate_andANoOpSignalsNothing() {
+        var a = UUID.randomUUID();
+        var b = UUID.randomUUID();
+        when(repo.unblock(anyString(), anyString(), anyString(), anyLong())).thenReturn(Optional.empty());
+        when(repo.unmute(anyString(), anyString(), anyString(), anyLong())).thenReturn(Optional.of(5L));
+
+        assertThat(service.unblock(a, b)).isFalse();
+        assertThat(service.unblock(a, a)).isFalse(); // self: nothing to remove, still no error
+        assertThat(service.unmute(a, b)).isTrue();
+
+        verify(repo, never()).existsById(anyString());
+        verify(events, times(1)).publishEvent(any(FollowGraphChanged.class));
+    }
+
+    @Test
+    void muteIsIdempotentAndSignalsOnlyOnChange() {
+        var a = UUID.randomUUID();
+        var b = UUID.randomUUID();
+        when(repo.existsById(anyString())).thenReturn(true);
+        when(repo.mute(eq(a.toString()), eq(b.toString()), anyString(), anyLong()))
+                .thenReturn(Optional.of(1L), Optional.empty());
+
+        assertThat(service.mute(a, b)).isTrue();
+        assertThat(service.mute(a, b)).isFalse();
+        verify(events, times(1)).publishEvent(any(FollowGraphChanged.class));
+    }
+
+    @Test
+    void followingAcrossABlockIsForbiddenInBothDirections_alreadyFollowingIsStillANoOp() {
+        var a = UUID.randomUUID();
+        var b = UUID.randomUUID();
+        when(repo.existsById(anyString())).thenReturn(true);
+        when(repo.follow(anyString(), anyString(), anyString(), anyLong())).thenReturn(Optional.empty());
+        when(repo.isBlockedEitherWay(a.toString(), b.toString())).thenReturn(true);
+        when(repo.isBlockedEitherWay(b.toString(), a.toString())).thenReturn(true);
+
+        assertThatThrownBy(() -> service.follow(new FollowUserCommand(a, b)))
+                .isInstanceOf(ForbiddenOperationException.class).hasMessage("You cannot follow this user");
+        assertThatThrownBy(() -> service.follow(new FollowUserCommand(b, a)))
+                .isInstanceOf(ForbiddenOperationException.class).hasMessage("You cannot follow this user");
+
+        var c = UUID.randomUUID();
+        assertThat(service.follow(new FollowUserCommand(a, c))).isFalse(); // no block: plain no-op
+        verifyNoInteractions(events);
+    }
+
+    @Test
+    void relationshipHasNoBlockedByFlag_andIsAllFalseForSelf() {
+        var me = UUID.randomUUID();
+        var other = UUID.randomUUID();
+        when(repo.isFollowing(me.toString(), other.toString())).thenReturn(true);
+        when(repo.isFollowing(other.toString(), me.toString())).thenReturn(false);
+        when(repo.isBlocking(me.toString(), other.toString())).thenReturn(false);
+        when(repo.isMuting(me.toString(), other.toString())).thenReturn(true);
+
+        assertThat(service.getRelationship(me, other))
+                .isEqualTo(new SocialGraphService.Relationship(true, false, false, true));
+        assertThat(service.getRelationship(me, me))
+                .isEqualTo(new SocialGraphService.Relationship(false, false, false, false));
+        verify(repo, never()).isBlocking(other.toString(), me.toString()); // "blocked by" is never asked
+        assertThat(SocialGraphService.Relationship.class.getRecordComponents())
+                .extracting(java.lang.reflect.RecordComponent::getName)
+                .containsExactly("following", "followedBy", "blocked", "muted");
     }
 }

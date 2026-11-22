@@ -292,4 +292,61 @@ class UserControllerSecurityTest {
 
         verify(socialGraphService).isFollowing(eq(alice.getId().toString()), eq(bobId.toString()));
     }
+
+    // ── Blocks and mutes (stage 5A) ─────────────────────────────────────────
+
+    @Test
+    void blockAndMuteActAsThePrincipal_andAnswer204() throws Exception {
+        mvc.perform(put("/api/v1/social/block/{id}", bobId).header(HttpHeaders.AUTHORIZATION, bearer(alice)))
+                .andExpect(status().isNoContent());
+        mvc.perform(delete("/api/v1/social/block/{id}", bobId).header(HttpHeaders.AUTHORIZATION, bearer(alice)))
+                .andExpect(status().isNoContent());
+        mvc.perform(put("/api/v1/social/mute/{id}", bobId).header(HttpHeaders.AUTHORIZATION, bearer(alice)))
+                .andExpect(status().isNoContent());
+        mvc.perform(delete("/api/v1/social/mute/{id}", bobId).header(HttpHeaders.AUTHORIZATION, bearer(alice)))
+                .andExpect(status().isNoContent());
+
+        verify(socialGraphService).block(alice.getId(), bobId);
+        verify(socialGraphService).unblock(alice.getId(), bobId);
+        verify(socialGraphService).mute(alice.getId(), bobId);
+        verify(socialGraphService).unmute(alice.getId(), bobId);
+    }
+
+    @Test
+    void blockErrorsMapTo400And404_malformedIdIs400_noTokenIs401() throws Exception {
+        when(socialGraphService.block(alice.getId(), alice.getId()))
+                .thenThrow(new IllegalArgumentException("A user cannot block themselves"));
+        when(socialGraphService.block(alice.getId(), bobId))
+                .thenThrow(new com.socialapp.shared.domain.NotFoundException("User not found: " + bobId));
+
+        mvc.perform(put("/api/v1/social/block/{id}", alice.getId()).header(HttpHeaders.AUTHORIZATION, bearer(alice)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error", is("A user cannot block themselves")));
+        mvc.perform(put("/api/v1/social/block/{id}", bobId).header(HttpHeaders.AUTHORIZATION, bearer(alice)))
+                .andExpect(status().isNotFound());
+        mvc.perform(put("/api/v1/social/mute/not-a-uuid").header(HttpHeaders.AUTHORIZATION, bearer(alice)))
+                .andExpect(status().isBadRequest());
+        mvc.perform(put("/api/v1/social/block/{id}", bobId)).andExpect(status().isUnauthorized());
+        mvc.perform(get("/api/v1/social/blocks")).andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void blocksMutesAndRelationshipHaveTheContractShapes() throws Exception {
+        var bob = new com.socialapp.socialgraph.domain.UserNode(bobId.toString(), "bob", "b.png");
+        when(socialGraphService.getBlocked(alice.getId())).thenReturn(java.util.List.of(bob));
+        when(socialGraphService.getMuted(alice.getId())).thenReturn(java.util.List.of());
+        when(socialGraphService.getRelationship(alice.getId(), bobId))
+                .thenReturn(new SocialGraphService.Relationship(true, false, false, true));
+
+        mvc.perform(get("/api/v1/social/blocks").header(HttpHeaders.AUTHORIZATION, bearer(alice)))
+                .andExpect(status().isOk())
+                .andExpect(content().json("[{\"userId\":\"" + bobId + "\",\"username\":\"bob\",\"avatarUrl\":\"b.png\"}]",
+                        org.springframework.test.json.JsonCompareMode.STRICT));
+        mvc.perform(get("/api/v1/social/mutes").header(HttpHeaders.AUTHORIZATION, bearer(alice)))
+                .andExpect(status().isOk()).andExpect(content().json("[]"));
+        mvc.perform(get("/api/v1/social/relationship/{id}", bobId).header(HttpHeaders.AUTHORIZATION, bearer(alice)))
+                .andExpect(status().isOk())
+                .andExpect(content().json("{\"userId\":\"" + bobId + "\",\"following\":true,\"followedBy\":false,"
+                        + "\"blocked\":false,\"muted\":true}", org.springframework.test.json.JsonCompareMode.STRICT));
+    }
 }

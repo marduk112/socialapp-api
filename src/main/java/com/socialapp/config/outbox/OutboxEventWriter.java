@@ -18,7 +18,8 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  *
  * <p>Routing is identical to the former {@code KafkaEventPublisher}: user events -> user-events keyed
  * by userId, post events -> post-events keyed by postId, reactions -> reaction-events keyed by postId.
- * Comment events -> comment-events keyed by postId (stage 3A). Follow events -> social-events keyed by followerId; they do not come from a JPA aggregate but are
+ * Comment events -> comment-events keyed by postId (stage 3A). Follow events -> social-events keyed by followerId, block and
+ * mute events (stage 5A) -> social-events keyed by blockerId / muterId; they do not come from a JPA aggregate but are
  * imported from SocialGraph's Neo4j outbox by {@link OutboxImporter} (which reuses {@link #routeOf}).
  * The sealed {@link DomainEvent} makes the switch exhaustive, so a new event type cannot be forgotten.
  *
@@ -69,6 +70,11 @@ public class OutboxEventWriter {
             case CommentCreatedEvent e -> new Route("Comment", commentEventsTopic, e.postId().toString());
             case UserFollowedEvent e -> new Route("Follow", socialEventsTopic, e.followerId().toString());
             case UserUnfollowedEvent e -> new Route("Follow", socialEventsTopic, e.followerId().toString());
+            // Blocks/mutes (5A) share social-events, keyed by the acting user like follows.
+            case UserBlockedEvent e -> new Route("Block", socialEventsTopic, e.blockerId().toString());
+            case UserUnblockedEvent e -> new Route("Block", socialEventsTopic, e.blockerId().toString());
+            case UserMutedEvent e -> new Route("Mute", socialEventsTopic, e.muterId().toString());
+            case UserUnmutedEvent e -> new Route("Mute", socialEventsTopic, e.muterId().toString());
         };
     }
 
