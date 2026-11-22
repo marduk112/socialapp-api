@@ -15,14 +15,17 @@ com.socialapp
 │   ├── domain/AggregateRoot.java  # extends Spring AbstractAggregateRoot
 │   └── events/                    # DomainEvent (sealed), UserCreatedEvent, UserUpdatedEvent, PostCreatedEvent,
 │                                  # ReactionEvent, UserFollowedEvent, UserUnfollowedEvent, CommentCreatedEvent,
+│                                  # UserBlockedEvent, UserUnblockedEvent, UserMutedEvent, UserUnmutedEvent (5A),
 │                                  # Snippet (<= 120 code point plain-text excerpt carried by events)
 ├── usermanagement/
-│   ├── domain/       User, UserId, UserRepository
-│   ├── application/  UserService, CreateUserCommand, UpdateUserCommand
-│   └── infrastructure/web/  UserController, UserPersistenceAdapter, UserJpaRepository
+│   ├── domain/       User, UserId, UserRepository, UserBlockRepository (port, 5A)
+│   ├── application/  UserService, CreateUserCommand, UpdateUserCommand, UserBlockProjection (5A)
+│   └── infrastructure/  web/ UserController, UserSearchController   persistence/ UserPersistenceAdapter,
+│                        UserJpaRepository, JdbcUserBlockRepository   messaging/ BlockEventConsumer (social-events, 5A)
 ├── socialgraph/
-│   ├── domain/       UserNode, UserNodeRepository
-│   ├── application/  SocialGraphService, FollowUserCommand, FollowGraphChanged (in-process signal)
+│   ├── domain/       UserNode, UserNodeRepository (FOLLOWS, BLOCKS, MUTES Cypher)
+│   ├── application/  SocialGraphService (follow, block, mute, relationship), FollowUserCommand,
+│   │                 FollowGraphChanged (in-process signal)
 │   └── infrastructure/
 │       ├── messaging/  UserEventConsumer          web/  SocialGraphController
 │       ├── outbox/     SocialOutboxStore, SocialOutboxForwarder (Neo4j outbox -> Postgres outbox)
@@ -30,27 +33,29 @@ com.socialapp
 └── feed/
     ├── domain/       Post, PostType, Comment, PostReaction, Follow, Bookmark (+ repositories), HashtagParser, MentionParser,
     │                 Mention, PostHashtagRepository / PostMentionRepository (ports), PostMedia + PostMediaRepository,
-    │                 ImageFormat (3C)
+    │                 ImageFormat (3C), BlockMuteRepository (port, 5A)
     ├── application/  usecase/  PostService, PostView, AuthorProfileProjection, FollowProjection,
-    │                           MentionLookup, PostTextIndexBackfill (pre-2B hashtags/mentions), BookmarkService (3B)
-    │                 timeline/ TimelineService, FeedCursor, FeedScope, FeedPage, FolloweeLookup
+    │                           MentionLookup, PostTextIndexBackfill (pre-2B hashtags/mentions), BookmarkService (3B),
+    │                           BlockMuteProjection, PostVisibility (5A)
+    │                 timeline/ TimelineService, FeedCursor, FeedScope, FeedPage, FolloweeLookup, BlockMuteLookup (5A)
     │                 media/    MediaService, ImageInspector, MediaStorage (port), MediaView, MediaProperties,
     │                           MediaRejectedException (3C)
     └── infrastructure/
         ├── web/      PostController, PostResponse (REST + SSE `original` shape), MaxCodePoints, MediaController
         ├── media/    LocalDiskMediaStorage, MediaFileController (GET /uploads/media/**), MediaCleanupJob, MediaConfig
-        ├── persistence/ JdbcPostHashtagRepository, JdbcPostMentionRepository (JDBC, same JPA tx)
+        ├── persistence/ JdbcPostHashtagRepository, JdbcPostMentionRepository, JdbcBlockMuteRepository (JDBC, same JPA tx)
         ├── sse/      FeedSseService
         └── messaging/ PostEventConsumer, UserEventConsumer, SocialEventConsumer
 └── notification/                  # stage 3A, see "Notifications"
     ├── domain/       Notification (aggregate, dedupe/toggle rules), NotificationType, NotificationIntent,
     │                 NotificationPolicy (pure: who is notified), ActorProfile (+ repositories)
-    ├── application/  NotificationService, ActorProfileProjection, NotificationCursor, NotificationPage,
-    │                 NotificationView, ports NotificationQueries / NotificationCutoff
+    ├── application/  NotificationService, ActorProfileProjection, ActorRestrictionProjection (5A), NotificationCursor,
+    │                 NotificationPage, NotificationView, ports NotificationQueries / NotificationCutoff / ActorRestrictions
     └── infrastructure/
         ├── web/         NotificationController, NotificationResponse (REST + SSE shape)
         ├── sse/         NotificationSseService (per-user streams)
-        ├── persistence/ JdbcNotificationQueries (read side, LEFT JOIN profiles), JdbcNotificationCutoff
+        ├── persistence/ JdbcNotificationQueries (read side, LEFT JOIN profiles), JdbcNotificationCutoff,
+        │                JdbcActorRestrictions (5A)
         └── messaging/   NotificationEventConsumer (5 listeners, one per topic)
 ```
 
@@ -86,7 +91,8 @@ blocked send/connection never delays shutdown (unstamped rows are re-published l
 **Never publish to Kafka directly from domain or application layer.** Always go through `registerEvent()`,
 inside a JPA `@Transactional` method (or, for Neo4j state, the Neo4j outbox below). Adding an event type: add
 it to the sealed `DomainEvent` (+ `@JsonSubTypes`), the (exhaustive) switch in `OutboxEventWriter.routeOf`, and the
-exhaustive switches of every consumer (`UserEventConsumer` x2, `SocialEventConsumer`, `NotificationEventConsumer`).
+exhaustive switches of every consumer (`UserEventConsumer` x2, `SocialEventConsumer`, `NotificationEventConsumer`,
+`BlockEventConsumer`) and, for a SocialGraph event, `SocialOutboxForwarder.toEvent`.
 Wire formats are append-only: new fields go at the end, readers must accept their absence (null / empty).
 
 ### Feed events for notifications (stage 3A)
@@ -126,6 +132,8 @@ Wire formats are append-only: new fields go at the end, readers must accept thei
    Malformed `:SocialOutbox` nodes (only by manual edits) are logged at ERROR and left in Neo4j for repair.
 4. Consumers must be idempotent and order-tolerant: keep the event with the newest `occurredAt` per
    (follower, followee) (Kafka order is best effort; correctness relies on `occurredAt`).
+
+Blocks and mutes (stage 5A) use exactly the same mechanism, see "Blocks and mutes".
 
 Follows that existed before stage 2A are backfilled automatically by `FollowProjectionBackfill` (see "Startup
 backfills"): per follower, one Neo4j tx takes the same follower lock and per-follower clock and records one
@@ -189,8 +197,10 @@ without tags are passed once (the cursor), never rescanned. Note: a post created
   replication factor 1), each with a `<topic>.DLT` (DefaultErrorHandler: 3 attempts, then dead-letter)
 - Consumer groups (one listener per BC per topic, switch on the sealed `DomainEvent`):
   `social-graph-group` (user-events), `feed-avatar-group` (user-events), `feed-sse-group` (post-events),
-  `feed-follows-group` (social-events -> `follows`), and Notification's `notification-users-group` (user-events ->
-  actor profiles), `notification-social-group` (social-events), `notification-posts-group` (post-events),
+  `feed-follows-group` (social-events -> `follows`, `feed_blocks`, `feed_mutes`), `user-blocks-group` (UserManagement:
+  social-events -> `user_blocks`, 5A), and Notification's `notification-users-group` (user-events ->
+  actor profiles), `notification-social-group` (social-events, incl. the block/mute projection),
+  `notification-posts-group` (post-events),
   `notification-reactions-group` (reaction-events), `notification-comments-group` (comment-events). New groups start
   at the earliest offset (history is replayed; see "Notifications" for why that creates no historic notifications).
 
@@ -247,6 +257,11 @@ Current migrations:
 - `V23__posts_fulltext_search.sql` — GIN `ix_posts_content_fts` on `to_tsvector('simple', content)` (see "Search")
 - `V24__users_username_trigram.sql` — `pg_trgm` extension + GIN `ix_users_username_trgm` on `lower(username)` (see "Search")
 - `V25__post_hashtags_created_index.sql` — `ix_post_hashtags_created (created_at DESC)` for the trending window scan (see "Trending hashtags")
+- `V26__feed_blocks_mutes.sql` — Feed's `feed_blocks (blocker_id, blocked_id, active, last_event_at)` (+ partial index
+  `ix_feed_blocks_blocked_active (blocked_id, blocker_id) WHERE active`) and `feed_mutes (muter_id, muted_id, ...)`
+- `V27__notification_blocks_mutes.sql` — `notification_blocks`, `notification_mutes` (same shape, PK lookups only)
+- `V28__user_blocks.sql` — UserManagement's `user_blocks` (+ `ix_user_blocks_blocked_active`) for people search
+  (all three: tombstones, newest `occurredAt` wins, no FKs; see "Blocks and mutes")
 
 **Always create a new numbered migration file. Never modify existing ones.**
 
@@ -272,7 +287,8 @@ Uses BCrypt (`BCryptPasswordEncoder`). Do NOT change to SHA-512 — BCrypt is in
   projection, plus the caller's own); other values -> 400.
 - Keyset pagination over `(created_at DESC, id DESC)` (`TimelineService`, native row-value queries in
   `PostRepository`); fetches size+1 to detect the last page (`nextCursor: null`). New/deleted posts between
-  requests never duplicate or skip the remaining posts.
+  requests never duplicate or skip the remaining posts. Posts hidden from the caller by blocks/mutes are filtered in
+  the same SQL (see "Blocks and mutes").
 - `cursor`: unpadded base64url of `v1|<ISO instant>|<uuid>` (`FeedCursor`); malformed -> 400 JSON.
 - `size`: default 20, values > 100 clamped to 100, < 1 or non-numeric -> 400 JSON.
 
@@ -469,6 +485,8 @@ Tests: `ImageInspectorTest`, `LocalDiskMediaStorageTest`, `MediaControllerTest` 
   `originalAuthorId` and `original` (a `PostResponse` built by `PostService.views` without a viewer: same nesting
   rules as REST, `viewerReposted = false`, `userReaction = null`). Pre-2C field names are unchanged (`postId`).
   The following-scope filter uses the payload's `authorId` (the reposter/quoter).
+- Both scopes (5A): per-viewer block/mute filter via `BlockMuteLookup`: skip, full payload, or a variant without the
+  blocked embedded post; each variant is serialised once per broadcast (see "Blocks and mutes").
 - Removes dead emitters on `SseEmitter.SseEventBuilderException`
 
 Heartbeat emitter is sent on subscribe with event name `"connected"`. Do NOT change event names — frontend listens for exactly `"connected"` and `"new-post"`.
@@ -547,6 +565,9 @@ Config: `app.jwt.secret` (env `APP_JWT_SECRET`, >= 32 bytes) and `app.jwt.expira
 - `NotificationIntegrationTest` (same container/context lifecycle): follow/like/unlike/comment/reply/mention/repost/quote
   over HTTP -> outbox -> Kafka -> Notification -> REST + SSE (isolation between users), and the enriched outbox rows.
 - `BookmarkIntegrationTest` (same lifecycle): bookmark/list/page/flag/isolation/cascade over HTTP.
+- `BlockMuteIntegrationTest` (same lifecycle): block/mute over HTTP -> Neo4j Cypher -> outbox -> Kafka -> all three
+  projections -> every filtered view, unblock/unmute. Waits for projections by polling the observable effect, and retries
+  the first follow while a user has not reached Neo4j yet (never sleeps).
 - `MediaIntegrationTest` (same lifecycle): upload (real Tomcat multipart limits) -> attach -> feed/post/SSE media -> serving
   headers -> delete removes rows and files; purge of expired uploads.
 - Kafka error handling is tested end to end for both a malformed record (DeserializationException -> DLT at once) and a
@@ -602,7 +623,8 @@ Do NOT use `mvn` command directly — use the Maven wrapper `./mvnw`.
 `GET /api/v1/social/suggestions?limit=5` (caller = JWT principal) -> `[{userId, username, avatarUrl, mutualFollowers}]`.
 `SocialGraphService.getSuggestions` (read-only Neo4j tx, limit clamped 1..20): friends of friends ranked by number of
 mutual followees (ties: username, id), topped up with the most followed users (`mutualFollowers = 0`, cold start / small
-graphs). Never contains the viewer or anyone already followed. Cypher lives in `Neo4jFollowSuggestionQueries`
+graphs). Never contains the viewer, anyone already followed, anyone the viewer blocks or mutes, or anyone who blocks the
+viewer (5A). Cypher lives in `Neo4jFollowSuggestionQueries`
 (port `FollowSuggestionQueries`, `Neo4jClient`); the popularity fallback scans all `:User` nodes - revisit (cached
 follower counts) if the graph gets large. Tests: `SocialGraphServiceTest` (fill/clamp), `SocialAppIntegrationTest` order 23.
 
@@ -623,7 +645,8 @@ filters `type <> 'REPOST'`); comments and `original_content` are not searched. `
 **People** `GET /api/v1/search/users?q=&limit=10` (UserManagement, `UserSearchController`, `UserService.searchByUsername`) ->
 `[{id, username, bio, avatarUrl}]` (public fields only - never e-mail). Case-insensitive substring of `username`; ranked exact
 match, then prefix, then the rest by username; `limit` clamped 1..20, no cursor. `q` trimmed, 1..50 code points, else 400. LIKE
-wildcards in `q` are literal (escaped in `UserPersistenceAdapter`). Index: trigram GIN (V24) serves terms of >= 3 characters;
+wildcards in `q` are literal (escaped in `UserPersistenceAdapter`). Users the caller blocks or is blocked by are left out
+(UserManagement's `user_blocks` projection, 5A). Index: trigram GIN (V24) serves terms of >= 3 characters;
 shorter ones scan the users table. `CREATE EXTENSION pg_trgm` needs only CREATE on the database (trusted extension, PG 13+).
 Tests: `TimelinePostgresTest` (search section), `UserSearchPostgresTest`, `UserServiceTest`, e2e `search.spec.ts`.
 
@@ -635,4 +658,87 @@ window -> 200 `[]`. ONE aggregate over `post_hashtags JOIN posts` for rows with 
 V25), ranked by DISTINCT AUTHORS, then posts, then tag - so one account repeating a tag cannot trend it. A post counts once per
 tag however often the text repeats it (the index is de-duplicated). Counts POSTs and QUOTEs (own text), never REPOSTs. Computed per
 request, no cache (a fresh post shows at once); add a short TTL cache here if the feed's request volume ever makes it matter.
-Not "velocity": a tag is ranked by volume in the window, not by growth. Tests: `TrendsServiceTest`, `TrendsPostgresTest`, e2e `trends.spec.ts`.
+Not "velocity": a tag is ranked by volume in the window, not by growth. Since 5A the counts are per viewer: posts of users
+the caller blocks, is blocked by or mutes are not counted (so a shared cache would have to be keyed by viewer). Tests: `TrendsServiceTest`, `TrendsPostgresTest`, e2e `trends.spec.ts`.
+
+## Blocks and mutes (stage 5A)
+
+**Block** (mutual in effect): A blocks B -> the FOLLOWS relationships A->B and B->A are deleted, new follows in either
+direction are refused (403 `You cannot follow this user`, same text for both sides), each side's content is hidden from the
+other (table below), no notifications are created between them and existing ones are hidden. Unblock restores visibility
+(nothing but the follows was deleted; follows are NOT restored). **Mute** (one-directional, silent): A mutes B -> B's
+posts/reposts and notifications are hidden from A's lists only; follows untouched; B is not told and can still interact;
+B's content stays visible when explicitly opened. Unmute restores.
+
+**Source of truth: SocialGraph (Neo4j)**, like FOLLOWS: `(blocker)-[:BLOCKS {since}]->(blocked)`, `(muter)-[:MUTES {since}]->(muted)`.
+Writes are single Cypher statements in `UserNodeRepository` on the follow/unfollow template (acting node write-locked, change +
+`:SocialOutbox` node(s) in one Neo4j tx, `occurredAt` from the per-user `socialClock`, a no-op records nothing). `block` locks
+BOTH nodes in `userId` order (crossing blocks cannot deadlock; follow/unfollow lock their follower, so they serialise with the
+block on that node), deletes both FOLLOWS directions and records up to three events: `UserUnfollowedEvent(blocker, blocked)`
+(blocker's clock, tick t), `UserUnfollowedEvent(blocked, blocker)` (the blocked user's own clock: follow consumers order per
+follower) and `UserBlockedEvent` (blocker's clock, t+1). `follow` adds `NOT EXISTS { (a)-[:BLOCKS]-(b) }`; when it matched
+nothing, `SocialGraphService.follow` checks the block in the same tx (lock still held) and throws `ForbiddenOperationException`.
+New `:SocialOutbox` nodes name the pair `sourceId`/`targetId` (follow events keep `followerId`/`followeeId`; `SocialOutboxStore`
+reads both). Block/mute: self 400, unknown user 404. Unblock/unmute never validate and are always 204.
+Why not Postgres as the source of truth: the block must be checked atomically with follows (Neo4j) and "who to follow" needs it
+in the graph; per-BC projections keep the other BCs independent.
+
+**Events** (`social-events`, append-only, pinned in `DomainEventWireFormatTest`): `UserBlockedEvent` / `UserUnblockedEvent`
+(eventId, occurredAt, blockerId, blockedId; key = blockerId, aggregateType `Block`), `UserMutedEvent` / `UserUnmutedEvent`
+(eventId, occurredAt, muterId, mutedId; key = muterId, aggregateType `Mute`).
+
+**Projections** (no cross-BC reads; one atomic upsert per event, newest `occurredAt` per pair wins, undo = tombstone
+`active = false`: redelivered / late / out-of-order events never resurrect or drop a pair):
+
+| BC | Table(s) | Writer | Used by |
+|---|---|---|---|
+| Feed | `feed_blocks`, `feed_mutes` (V26) | `BlockMuteProjection` via `SocialEventConsumer` (invalidates `BlockMuteLookup`: both users of a block, the muter of a mute) | list SQL, `PostVisibility`, `PostService.views`, SSE |
+| Notification | `notification_blocks`, `notification_mutes` (V27) | `ActorRestrictionProjection` via `NotificationEventConsumer` | creation (`NotificationPolicy.withoutSuppressed`), read queries |
+| UserManagement | `user_blocks` (V28) | `UserBlockProjection` via `BlockEventConsumer` (`user-blocks-group`) | people search |
+
+**What is hidden where** (viewer V; "block" = V blocks X or X blocks V):
+
+| View | Block (both directions) | Mute (V muted X) |
+|---|---|---|
+| `GET /feed` all + following, `GET /feed/stream` (SSE, both scopes) | X's posts and REPOSTs of X's posts | same |
+| `GET /hashtags/{tag}/posts`, `GET /search/posts` | X's posts/quotes | same |
+| `GET /trends/hashtags` | X's posts not counted (posts and authors) | same |
+| `GET /social/suggestions` | X never suggested, either way (Neo4j, immediate) | X never suggested |
+| `GET /notifications`, unread count, notification SSE | none created either way; existing ones hidden | none from X; existing hidden |
+| `GET /search/users` | X not found, either way | not affected |
+| `GET /bookmarks` | X's posts and REPOSTs of them skipped (rows kept) | not affected |
+| `GET /posts/{id}/comments` | X's comments left out; on X's post -> 404 | not affected |
+| `GET /posts/{id}` | 404 (also a REPOST item of X's post) | visible |
+| embedded `original` of a QUOTE / quoted post of a REPOST-of-QUOTE | null, with `originalAuthorId` and the legacy snapshot fields ("unavailable", like a deleted original); SSE sends the same stripped variant | shown |
+| like/dislike, comment, reply, comment like, repost, quote, bookmark | 404 (`Post/Comment/Parent comment not found`), indistinguishable from a deleted target; removing an own earlier reaction/bookmark/repost still works | allowed |
+| `@mention` of X | the post is created and indexed; no MENTION notification | X's mentions of V do not notify V |
+
+Lists filter in SQL BEFORE the LIMIT (`PostRepository.LISTED_FOR_VIEWER` / `NOT_BLOCKED_FOR_VIEWER` over the uncorrelated
+`HIDDEN_FROM_VIEWER` / `BLOCKED_WITH_VIEWER` subqueries, evaluated once per query; notifications: `JdbcActorRestrictions.
+NOT_SUPPRESSED`, three PK lookups per row), so keyset/offset pages stay exact. Point checks (`PostVisibility`) cost one query
+(+ the original of a REPOST). `PostService.views` adds one query only when the page embeds originals (budget <= 11). The SSE
+filter uses `BlockMuteLookup` (per-viewer cache, `app.feed.restrictions-cache-ttl` 5 s, invalidated on the consuming
+instance), so a change applies to open streams without reconnecting. Not filtered on purpose: profiles (`GET /users/{id}`),
+follower/following lists, counters (likes, comments, reposts), "mark all read". Retractions (unlike/unfollow) are applied even
+during a block, so an undone like never reappears after an unblock.
+
+**Privacy:** `GET /social/relationship/{userId}` returns only the caller's side (`blocked`/`muted` = BY the caller); there is no
+"blocked by" flag. The blocked user only notices the unavoidable: follow 403 and the other side's content gone (404 / missing).
+
+**Lag:** the graph (follows removed, follow refused, suggestions, `/social/blocks`, relationship) changes synchronously with
+the REST call. The Feed / Notification / search projections follow via Neo4j outbox -> forwarder (AFTER_COMMIT wake-up) ->
+Postgres outbox -> relay (wake-up) -> Kafka -> consumer: typically well under a second; longer only while Postgres/Kafka are
+down (nothing is lost). Until then the old visibility applies (clients should hide the user optimistically after the 204);
+interactions in that window are not undone later (their notifications are hidden by the read side).
+
+**API** (all authenticated, acting user = JWT principal):
+- `PUT /api/v1/social/block/{userId}` -> 204 (idempotent); self 400; unknown user 404; malformed id 400.
+- `DELETE /api/v1/social/block/{userId}` -> 204 always. `GET /api/v1/social/blocks` -> `[{userId, username, avatarUrl}]` (by username).
+- `PUT|DELETE /api/v1/social/mute/{userId}`, `GET /api/v1/social/mutes`: same contract.
+- `GET /api/v1/social/relationship/{userId}` -> `{userId, following, followedBy, blocked, muted}`, always 200 (self/unknown: all false).
+- `POST /api/v1/social/follow` across a block (either direction) -> 403 `{"error": "You cannot follow this user", ...}`.
+
+Tests: `UserNodeTest`, `SocialGraphServiceTest`, `SocialOutboxForwarderTest`, `OutboxEventWriterTest`, `DomainEventWireFormatTest`,
+`NotificationPolicyTest`, `NotificationEventConsumerTest`, `PostServiceTest`, `FeedSseServiceTest`, `BlockMuteLookupTest`,
+`UserControllerSecurityTest` (web), `BlockMutePostgresTest` (Feed projection, every list, pages, bookmarks, comments, trends),
+`NotificationPostgresTest` (5A section), `UserSearchPostgresTest`, `BlockMuteIntegrationTest` (full stack incl. the Cypher).
