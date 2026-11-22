@@ -1,5 +1,6 @@
 package com.socialapp.feed.infrastructure.sse;
 
+import com.socialapp.feed.application.timeline.BlockMuteLookup;
 import com.socialapp.feed.application.timeline.FeedScope;
 import com.socialapp.feed.application.timeline.FolloweeLookup;
 import com.socialapp.feed.application.media.MediaView;
@@ -19,7 +20,9 @@ import tools.jackson.databind.json.JsonMapper;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Supplier;
@@ -31,6 +34,10 @@ import java.util.function.Supplier;
  * users the viewer follows, evaluated per post against Feed's follows projection
  * ({@link FolloweeLookup}, short-TTL cache), so follows made while connected take effect without
  * reconnecting. Event names ("connected", "new-post") and payload are the same for both scopes.
+ *
+ * <p>Stage 5A, both scopes, per viewer ({@link BlockMuteLookup}, same kind of cache): a post is not sent when its
+ * author is blocked either way or muted by the viewer, nor a REPOST of such an author's post; a QUOTE of a blocked
+ * user's post (or a REPOST of a quote of one) is sent with that embedded post removed ("unavailable", like REST).
  */
 @Service
 @Slf4j
@@ -42,16 +49,19 @@ public class FeedSseService {
     private final List<Subscription> subscriptions = new CopyOnWriteArrayList<>();
     private final JsonMapper objectMapper;
     private final FolloweeLookup followeeLookup;
+    private final BlockMuteLookup blockMuteLookup;
     private final Supplier<SseEmitter> emitterFactory;
 
     @Autowired
-    public FeedSseService(JsonMapper objectMapper, FolloweeLookup followeeLookup) {
-        this(objectMapper, followeeLookup, () -> new SseEmitter(Long.MAX_VALUE));
+    public FeedSseService(JsonMapper objectMapper, FolloweeLookup followeeLookup, BlockMuteLookup blockMuteLookup) {
+        this(objectMapper, followeeLookup, blockMuteLookup, () -> new SseEmitter(Long.MAX_VALUE));
     }
 
-    FeedSseService(JsonMapper objectMapper, FolloweeLookup followeeLookup, Supplier<SseEmitter> emitterFactory) {
+    FeedSseService(JsonMapper objectMapper, FolloweeLookup followeeLookup, BlockMuteLookup blockMuteLookup,
+                   Supplier<SseEmitter> emitterFactory) {
         this.objectMapper = objectMapper;
         this.followeeLookup = followeeLookup;
+        this.blockMuteLookup = blockMuteLookup;
         this.emitterFactory = emitterFactory;
     }
 
@@ -101,6 +111,19 @@ public class FeedSseService {
                               List<Mention> mentions, PostType type, UUID originalAuthorId, PostResponse original) {
             this(postId, authorId, authorUsername, authorAvatarUrl, content, imageUrl, occurredAt, originalPostId,
                     originalAuthorUsername, originalContent, hashtags, mentions, type, originalAuthorId, original, null);
+        }
+
+        /** The same payload without its embedded original and the snapshot fields (original "unavailable"). */
+        PostSsePayload withoutOriginal() {
+            return new PostSsePayload(postId, authorId, authorUsername, authorAvatarUrl, content, imageUrl, occurredAt,
+                    null, null, null, hashtags, mentions, type, null, null, media);
+        }
+
+        /** The same payload with the second level (the quoted post inside a reposted quote) removed. */
+        PostSsePayload withoutQuotedPost() {
+            return new PostSsePayload(postId, authorId, authorUsername, authorAvatarUrl, content, imageUrl, occurredAt,
+                    originalPostId, originalAuthorUsername, originalContent, hashtags, mentions, type, originalAuthorId,
+                    original == null ? null : original.withoutOriginal(), media);
         }
 
         /** A plain post (pre-2C shape). */
@@ -160,23 +183,23 @@ public class FeedSseService {
         return subscriptions.size();
     }
 
+    /** What one viewer gets of a broadcast payload. */
+    enum Delivery { SKIP, FULL, WITHOUT_ORIGINAL, WITHOUT_QUOTED_POST }
+
     @Async
     public void broadcast(PostSsePayload payload) {
-        String json;
-        try {
-            json = objectMapper.writeValueAsString(payload);
-        } catch (JacksonException e) {
-            log.error("Cannot serialize SSE payload for post {}", payload.postId(), e);
-            return;
-        }
+        Map<Delivery, String> json = new EnumMap<>(Delivery.class); // serialised lazily, once per variant
         List<Subscription> dead = new ArrayList<>();
 
         for (Subscription subscription : subscriptions) {
-            if (!admits(subscription, payload)) continue;
+            var delivery = deliveryFor(subscription, payload);
+            if (delivery == Delivery.SKIP) continue;
+            String data = json.computeIfAbsent(delivery, d -> serialize(variant(payload, d)));
+            if (data == null) continue; // not serialisable (logged)
             try {
                 subscription.emitter().send(SseEmitter.event()
                         .name("new-post")
-                        .data(json));
+                        .data(data));
             } catch (IOException e) {
                 dead.add(subscription);
                 log.debug("SSE emitter dead, removing. Remaining: {}", subscriptions.size() - dead.size());
@@ -185,15 +208,45 @@ public class FeedSseService {
         subscriptions.removeAll(dead);
     }
 
-    private boolean admits(Subscription subscription, PostSsePayload payload) {
-        if (subscription.scope() == FeedScope.ALL) return true;
+    private String serialize(PostSsePayload payload) {
         try {
-            return followeeLookup.isVisibleInFollowing(subscription.viewerId(), payload.authorId());
+            return objectMapper.writeValueAsString(payload);
+        } catch (JacksonException e) {
+            log.error("Cannot serialize SSE payload for post {}", payload.postId(), e);
+            return null;
+        }
+    }
+
+    private static PostSsePayload variant(PostSsePayload payload, Delivery delivery) {
+        return switch (delivery) {
+            case WITHOUT_ORIGINAL -> payload.withoutOriginal();
+            case WITHOUT_QUOTED_POST -> payload.withoutQuotedPost();
+            case FULL, SKIP -> payload;
+        };
+    }
+
+    Delivery deliveryFor(Subscription subscription, PostSsePayload payload) {
+        try {
+            if (subscription.scope() == FeedScope.FOLLOWING
+                    && !followeeLookup.isVisibleInFollowing(subscription.viewerId(), payload.authorId())) {
+                return Delivery.SKIP;
+            }
+            var restrictions = blockMuteLookup.of(subscription.viewerId());
+            if (restrictions.hides(payload.authorId())) return Delivery.SKIP;
+            var original = payload.original();
+            if (original == null) return Delivery.FULL;
+            if (payload.type() == PostType.REPOST) {
+                if (restrictions.hides(original.authorId())) return Delivery.SKIP; // a repost is only its original
+                var quoted = original.original();
+                return quoted != null && restrictions.blocks(quoted.authorId())
+                        ? Delivery.WITHOUT_QUOTED_POST : Delivery.FULL;
+            }
+            return restrictions.blocks(original.authorId()) ? Delivery.WITHOUT_ORIGINAL : Delivery.FULL;
         } catch (RuntimeException e) {
-            // Projection unreadable (DB down): skip rather than leak unrelated posts; the client's
+            // Projection unreadable (DB down): skip rather than leak unrelated or hidden posts; the client's
             // REST refresh catches up later.
-            log.warn("Cannot evaluate following filter for viewer {}: {}", subscription.viewerId(), e.toString());
-            return false;
+            log.warn("Cannot evaluate the feed filters for viewer {}: {}", subscription.viewerId(), e.toString());
+            return Delivery.SKIP;
         }
     }
 }

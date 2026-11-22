@@ -32,8 +32,9 @@ class PostServiceTest {
     private final PostMediaRepository media = mock(PostMediaRepository.class);
     private final com.socialapp.feed.application.media.MediaStorage storage =
             mock(com.socialapp.feed.application.media.MediaStorage.class);
+    private final BlockMuteRepository blockMutes = mock(BlockMuteRepository.class); // nobody blocked unless stubbed
     private final PostService service = new PostService(posts, reactions, comments, commentReactions, profiles,
-            hashtags, mentions, bookmarks, media, storage);
+            hashtags, mentions, bookmarks, media, storage, new PostVisibility(blockMutes, posts));
 
     @BeforeEach
     void saveReturnsArgument() {
@@ -589,5 +590,106 @@ class PostServiceTest {
             verify(posts, never()).findById(any());
             verify(profiles, never()).findById(any());
         }
+    }
+
+    // ── Blocks (stage 5A) ────────────────────────────────────────────────────
+
+    /** {@code viewer} and {@code other} block each other (direction does not matter to Feed's checks). */
+    private void blocked(UUID viewer, UUID other) {
+        when(blockMutes.blockedAmong(eq(viewer), any())).thenAnswer(inv -> {
+            java.util.Collection<UUID> ids = inv.getArgument(1);
+            return ids.contains(other) ? Set.of(other) : Set.of();
+        });
+    }
+
+    @Test
+    void aBlockedUsersPostIsNotFound_forOpeningLikingCommentingRepostingAndQuoting() {
+        var bobsPost = Post.create(BOB, "bob", "hi", null);
+        exists(bobsPost);
+        blocked(ALICE, BOB);
+        var id = bobsPost.getId();
+
+        assertThatThrownBy(() -> service.findVisibleById(id, ALICE)).isInstanceOf(NotFoundException.class);
+        assertThatThrownBy(() -> service.react(id, ALICE, ReactionType.LIKE, true))
+                .isInstanceOf(NotFoundException.class);
+        assertThatThrownBy(() -> service.addComment(id, ALICE, "alice", "c", null))
+                .isInstanceOf(NotFoundException.class);
+        assertThatThrownBy(() -> service.repost(id, ALICE, "alice")).isInstanceOf(NotFoundException.class);
+        assertThatThrownBy(() -> service.quote(id, ALICE, "alice", "q")).isInstanceOf(NotFoundException.class);
+        assertThatThrownBy(() -> service.getComments(id, ALICE, 0, 50)).isInstanceOf(NotFoundException.class);
+        verify(posts, never()).save(any());
+        verify(comments, never()).save(any());
+
+        // removing an old reaction stays possible; others are unaffected
+        assertThat(service.react(id, ALICE, ReactionType.LIKE, false)).isSameAs(bobsPost);
+        assertThat(service.findVisibleById(id, CAROL)).isSameAs(bobsPost);
+    }
+
+    @Test
+    void aRepostItemOfABlockedUsersPostIsNotFound_andRepliesToABlockedUsersCommentToo() {
+        var bobsPost = Post.create(BOB, "bob", "hi", null);
+        var carolsRepost = Post.repost(CAROL, "carol", bobsPost);
+        var carolsPost = Post.create(CAROL, "carol", "c", null);
+        var bobsComment = Comment.create(carolsPost, null, BOB, "bob", "b");
+        exists(bobsPost, carolsRepost, carolsPost);
+        when(comments.findByIdForUpdate(bobsComment.getId())).thenReturn(Optional.of(bobsComment));
+        blocked(ALICE, BOB);
+
+        assertThatThrownBy(() -> service.findVisibleById(carolsRepost.getId(), ALICE))
+                .isInstanceOf(NotFoundException.class);
+        assertThatThrownBy(() -> service.addComment(carolsPost.getId(), ALICE, "alice", "r", bobsComment.getId()))
+                .isInstanceOf(NotFoundException.class).hasMessageContaining("Parent comment not found");
+        assertThatThrownBy(() -> service.reactToComment(bobsComment.getId(), ALICE, ReactionType.LIKE, true))
+                .isInstanceOf(NotFoundException.class).hasMessageContaining("Comment not found");
+        verify(comments, never()).save(any());
+    }
+
+    @Test
+    void anEmbeddedOriginalOfABlockedUserIsHidden_withItsSnapshotFields() {
+        var bobsPost = Post.create(BOB, "bob", "secret", null);
+        var quote = Post.quote(CAROL, "carol", bobsPost, "look");
+        when(posts.findAllById(any())).thenReturn(List.of(bobsPost));
+        blocked(ALICE, BOB);
+
+        var forAlice = service.views(List.of(quote), ALICE).get(0);
+        var forDave = service.views(List.of(quote), UUID.randomUUID()).get(0);
+
+        assertThat(forAlice.original()).isNull();
+        assertThat(forAlice.originalHidden()).isTrue();
+        var json = com.socialapp.feed.infrastructure.web.PostResponse.from(forAlice);
+        assertThat(json.original()).isNull();
+        assertThat(json.originalAuthorId()).isNull();
+        assertThat(json.originalPostId()).isNull();
+        assertThat(json.originalContent()).isNull();
+        assertThat(json.originalAuthorUsername()).isNull();
+        assertThat(json.content()).isEqualTo("look");
+
+        assertThat(forDave.original().post()).isSameAs(bobsPost);
+        assertThat(forDave.originalHidden()).isFalse();
+        assertThat(com.socialapp.feed.infrastructure.web.PostResponse.from(forDave).originalContent()).isEqualTo("secret");
+    }
+
+    @Test
+    void aBlockedQuotedPostInsideARepostedQuoteIsHidden_theQuoteStays() {
+        var bobsPost = Post.create(BOB, "bob", "secret", null);
+        var quote = Post.quote(CAROL, "carol", bobsPost, "look");
+        var repost = Post.repost(UUID.randomUUID(), "dave", quote);
+        when(posts.findAllById(Set.of(quote.getId()))).thenReturn(List.of(quote));
+        when(posts.findAllById(Set.of(bobsPost.getId()))).thenReturn(List.of(bobsPost));
+        blocked(ALICE, BOB);
+
+        var view = service.views(List.of(repost), ALICE).get(0);
+
+        assertThat(view.original().post()).isSameAs(quote);
+        assertThat(view.original().original()).isNull();
+        assertThat(view.original().originalHidden()).isTrue();
+        assertThat(view.originalHidden()).isFalse();
+    }
+
+    @Test
+    void pagesWithoutEmbeddedPostsNeverAskTheBlockProjection() {
+        service.views(List.of(Post.create(BOB, "bob", "a", null), Post.create(CAROL, "carol", "b", null)), ALICE);
+
+        verifyNoInteractions(blockMutes);
     }
 }

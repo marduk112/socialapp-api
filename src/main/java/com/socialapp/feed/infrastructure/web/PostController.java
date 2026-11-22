@@ -74,7 +74,7 @@ public class PostController {
             @PathVariable String tag,
             @RequestParam(required = false) String cursor,
             @RequestParam(defaultValue = "" + TimelineService.DEFAULT_SIZE) int size) {
-        var page = timelineService.hashtagPage(tag, FeedCursor.decode(cursor), size);
+        var page = timelineService.hashtagPage(me.id(), tag, FeedCursor.decode(cursor), size);
         return ResponseEntity.ok(pageResponse(page, me));
     }
 
@@ -89,7 +89,7 @@ public class PostController {
             @RequestParam String q,
             @RequestParam(required = false) String cursor,
             @RequestParam(defaultValue = "" + TimelineService.DEFAULT_SIZE) int size) {
-        var page = timelineService.searchPage(q, FeedCursor.decode(cursor), size);
+        var page = timelineService.searchPage(me.id(), q, FeedCursor.decode(cursor), size);
         return ResponseEntity.ok(pageResponse(page, me));
     }
 
@@ -117,9 +117,10 @@ public class PostController {
         return ResponseEntity.status(HttpStatus.CREATED).body(enriched(post, me));
     }
 
+    /** 404 for an unknown post and for one hidden from the caller by a block in either direction (stage 5A). */
     @GetMapping("/posts/{id}")
     public ResponseEntity<PostResponse> getPost(@PathVariable UUID id, @AuthenticationPrincipal AuthenticatedUser me) {
-        return ResponseEntity.ok(enriched(postService.findById(id), me));
+        return ResponseEntity.ok(enriched(postService.findVisibleById(id, me.id()), me));
     }
 
     @PutMapping("/posts/{id}")
@@ -264,12 +265,17 @@ public class PostController {
         return ResponseEntity.status(HttpStatus.CREATED).body(enrichedComment(comment));
     }
 
+    /**
+     * Comments of a post, oldest first, offset-paged. Stage 5A: a post hidden from the caller by a block -> 404;
+     * comments by users the caller blocks or is blocked by are left out.
+     */
     @GetMapping("/posts/{postId}/comments")
     public ResponseEntity<List<CommentResponse>> getComments(
             @PathVariable UUID postId,
+            @AuthenticationPrincipal AuthenticatedUser me,
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "50") int size) {
-        var comments = postService.getComments(postId, page, size);
+        var comments = postService.getComments(postId, me.id(), page, size);
         Set<UUID> authorIds = comments.stream().map(Comment::getAuthorId).collect(Collectors.toSet());
         var avatarMap = postService.getAuthorAvatarUrls(authorIds);
         return ResponseEntity.ok(

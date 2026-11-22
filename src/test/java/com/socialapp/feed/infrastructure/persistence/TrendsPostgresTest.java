@@ -29,6 +29,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 @Import({JdbcPostHashtagRepository.class, TrendsService.class})
 class TrendsPostgresTest {
 
+    /** A viewer without any block or mute. */
+    private static final java.util.UUID VIEWER = java.util.UUID.randomUUID();
+
     @Container
     static final PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:18-alpine");
 
@@ -60,14 +63,14 @@ class TrendsPostgresTest {
     }
 
     private List<String> tags(int hours, int limit) {
-        return trends.trendingHashtags(hours, limit).stream().map(TrendingHashtag::tag).toList();
+        return trends.trendingHashtags(VIEWER, hours, limit).stream().map(TrendingHashtag::tag).toList();
     }
 
     @Test
     void nothingRecentMeansNoTrends() {
         post(A, Duration.ofDays(3), "old");
 
-        assertThat(trends.trendingHashtags(24, 10)).isEmpty();
+        assertThat(trends.trendingHashtags(VIEWER, 24, 10)).isEmpty();
     }
 
     @Test
@@ -80,7 +83,7 @@ class TrendsPostgresTest {
         post(C, Duration.ofHours(3), "alpha", "beta"); // 1 post, 1 author each
         post(A, Duration.ofHours(3), "zeta");          // 1 post, 1 author
 
-        var result = trends.trendingHashtags(24, 10);
+        var result = trends.trendingHashtags(VIEWER, 24, 10);
 
         assertThat(result).containsExactly(
                 new TrendingHashtag("popular", 2, 2),
@@ -96,7 +99,7 @@ class TrendsPostgresTest {
         post(B, Duration.ofHours(30), "fresh");   // outside 24 h
         post(B, Duration.ofHours(30), "stale");
 
-        assertThat(trends.trendingHashtags(24, 10)).containsExactly(new TrendingHashtag("fresh", 1, 1));
+        assertThat(trends.trendingHashtags(VIEWER, 24, 10)).containsExactly(new TrendingHashtag("fresh", 1, 1));
         assertThat(tags(48, 10)).containsExactly("fresh", "stale");
     }
 

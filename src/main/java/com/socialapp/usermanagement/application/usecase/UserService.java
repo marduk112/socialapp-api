@@ -94,16 +94,17 @@ public class UserService implements CreateUserUseCase, UpdateUserUseCase {
      * People search by username (case-insensitive substring; exact match first, then prefix).
      *
      * @param term trimmed, 1..{@value #MAX_SEARCH_TERM_LENGTH} code points
+     * @param viewerId the searcher: users they block or are blocked by are never returned (stage 5A)
      * @param limit clamped to 1..{@value #MAX_SEARCH_LIMIT}
      * @throws IllegalArgumentException (400) for a blank or too long term
      */
     @Transactional(readOnly = true)
-    public List<User> searchByUsername(String term, int limit) {
+    public List<User> searchByUsername(String term, UUID viewerId, int limit) {
         String t = term == null ? "" : term.trim();
         int length = t.codePointCount(0, t.length());
         if (length < 1 || length > MAX_SEARCH_TERM_LENGTH) {
             throw new IllegalArgumentException("q must be 1 to " + MAX_SEARCH_TERM_LENGTH + " characters");
         }
-        return userRepository.searchByUsername(t, Math.max(1, Math.min(limit, MAX_SEARCH_LIMIT)));
+        return userRepository.searchByUsername(t, viewerId, Math.max(1, Math.min(limit, MAX_SEARCH_LIMIT)));
     }
 }

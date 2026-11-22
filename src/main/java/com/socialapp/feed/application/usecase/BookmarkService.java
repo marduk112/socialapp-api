@@ -21,7 +21,9 @@ import java.util.stream.Collectors;
 /**
  * Private bookmarks ("saved posts"). A bookmark belongs to its user only: every operation is scoped by the caller's
  * id. Bookmarking a repost item bookmarks that item (the id as given), not its original. Deleting a post cascades
- * to its bookmarks (V21 FK), and the list skips a post that disappears between the two reads.
+ * to its bookmarks (V21 FK), and the list skips a post that disappears between the two reads. Posts hidden by a block
+ * (either direction, stage 5A) are skipped by the list query and cannot be bookmarked; the rows are kept, so they come
+ * back after an unblock. Mutes do not affect bookmarks.
  */
 @Service
 @RequiredArgsConstructor
@@ -29,15 +31,17 @@ public class BookmarkService {
 
     private final BookmarkRepository bookmarkRepository;
     private final PostRepository postRepository;
+    private final PostVisibility visibility;
 
     /**
      * Idempotent: bookmarking again keeps the original position in the list.
      *
-     * @throws NotFoundException unknown/deleted post
+     * @throws NotFoundException unknown/deleted post, or one hidden from the user by a block (stage 5A)
      */
     @Transactional
     public void bookmark(UUID userId, UUID postId) {
-        if (!postRepository.existsById(postId)) throw new NotFoundException("Post not found: " + postId);
+        var post = postRepository.findById(postId).orElseThrow(() -> new NotFoundException("Post not found: " + postId));
+        visibility.ensureNotBlocked(post, userId);
         bookmarkRepository.add(userId, postId);
     }
 

@@ -1,6 +1,7 @@
 package com.socialapp.notification.infrastructure.messaging;
 
 import com.socialapp.notification.application.ActorProfileProjection;
+import com.socialapp.notification.application.ActorRestrictionProjection;
 import com.socialapp.notification.application.NotificationService;
 import com.socialapp.notification.application.NotificationView;
 import com.socialapp.notification.infrastructure.sse.NotificationSseService;
@@ -8,9 +9,13 @@ import com.socialapp.shared.events.CommentCreatedEvent;
 import com.socialapp.shared.events.DomainEvent;
 import com.socialapp.shared.events.PostCreatedEvent;
 import com.socialapp.shared.events.ReactionEvent;
+import com.socialapp.shared.events.UserBlockedEvent;
 import com.socialapp.shared.events.UserCreatedEvent;
 import com.socialapp.shared.events.UserFollowedEvent;
+import com.socialapp.shared.events.UserMutedEvent;
+import com.socialapp.shared.events.UserUnblockedEvent;
 import com.socialapp.shared.events.UserUnfollowedEvent;
+import com.socialapp.shared.events.UserUnmutedEvent;
 import com.socialapp.shared.events.UserUpdatedEvent;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -34,6 +39,7 @@ public class NotificationEventConsumer {
     private final NotificationService notifications;
     private final ActorProfileProjection profiles;
     private final NotificationSseService sse;
+    private final ActorRestrictionProjection restrictions;
 
     @KafkaListener(topics = "${kafka.topics.user-events}", groupId = "notification-users-group",
             containerFactory = "notificationUserEventListenerContainerFactory")
@@ -81,6 +87,22 @@ public class NotificationEventConsumer {
             case PostCreatedEvent e -> notifications.on(e);
             case ReactionEvent e -> notifications.on(e);
             case CommentCreatedEvent e -> notifications.on(e);
+            case UserBlockedEvent e -> {
+                restrictions.on(e);
+                yield List.of();
+            }
+            case UserUnblockedEvent e -> {
+                restrictions.on(e);
+                yield List.of();
+            }
+            case UserMutedEvent e -> {
+                restrictions.on(e);
+                yield List.of();
+            }
+            case UserUnmutedEvent e -> {
+                restrictions.on(e);
+                yield List.of();
+            }
         };
         if (!visible.isEmpty()) {
             log.debug("{} notification(s) from {} {}", visible.size(), event.eventType(), event.eventId());

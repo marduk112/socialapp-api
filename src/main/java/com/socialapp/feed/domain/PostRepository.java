@@ -26,24 +26,58 @@ public interface PostRepository extends JpaRepository<Post, UUID> {
     @Query("select p from Post p where p.id = :id")
     Optional<Post> findByIdForUpdate(@Param("id") UUID id);
 
+    // ── Blocks and mutes (stage 5A) ─────────────────────────────────────────
+    // SQL fragments over Feed's projections (V26) shared by every list query, so filtering happens BEFORE the LIMIT
+    // and keyset pages stay exact (no short or skipped pages). Both subqueries are uncorrelated (Postgres evaluates
+    // them once per query as a hashed subplan) and served by pk_feed_blocks / ix_feed_blocks_blocked_active /
+    // pk_feed_mutes. They expect a {@code :viewerId} parameter. Columns are NOT NULL, so NOT IN is safe. The conditions
+    // start with a space: a text block drops the trailing space of "AND " before its closing delimiter.
+
+    /** Users the viewer must not see in lists: blocked by or blocking the viewer, or muted by the viewer. */
+    String HIDDEN_FROM_VIEWER = """
+            (SELECT x.blocked_id FROM feed_blocks x WHERE x.blocker_id = CAST(:viewerId AS uuid) AND x.active
+             UNION ALL SELECT x.blocker_id FROM feed_blocks x WHERE x.blocked_id = CAST(:viewerId AS uuid) AND x.active
+             UNION ALL SELECT x.muted_id FROM feed_mutes x WHERE x.muter_id = CAST(:viewerId AS uuid) AND x.active)""";
+
+    /** Users blocked by or blocking the viewer (mutes do not count). */
+    String BLOCKED_WITH_VIEWER = """
+            (SELECT x.blocked_id FROM feed_blocks x WHERE x.blocker_id = CAST(:viewerId AS uuid) AND x.active
+             UNION ALL SELECT x.blocker_id FROM feed_blocks x WHERE x.blocked_id = CAST(:viewerId AS uuid) AND x.active)""";
+
+    /**
+     * Condition on {@code posts p} for timelines, tag pages and search: the author is not hidden from the viewer, and a
+     * REPOST is not a repost of a hidden author's post (a REPOST carries nothing but the original).
+     */
+    String LISTED_FOR_VIEWER = " p.author_id NOT IN " + HIDDEN_FROM_VIEWER
+            + " AND (p.type <> 'REPOST' OR NOT EXISTS (SELECT 1 FROM posts o WHERE o.id = p.original_post_id"
+            + " AND o.author_id IN " + HIDDEN_FROM_VIEWER + "))";
+
+    /** Same as {@link #LISTED_FOR_VIEWER} with blocks only (bookmarks: a mute never hides explicitly saved posts). */
+    String NOT_BLOCKED_FOR_VIEWER = " p.author_id NOT IN " + BLOCKED_WITH_VIEWER
+            + " AND (p.type <> 'REPOST' OR NOT EXISTS (SELECT 1 FROM posts o WHERE o.id = p.original_post_id"
+            + " AND o.author_id IN " + BLOCKED_WITH_VIEWER + "))";
+
     // ── Timeline (keyset pagination) ────────────────────────────────────────
     // Order: created_at DESC, id DESC (id breaks ties of equal created_at, so the order is total and stable).
     // A page starts strictly after the key (createdAt, id) of the previous page's last post; the first page
     // passes a key greater than any post. The row-value comparison is done by Postgres (uuid ordering of
-    // the DB, not java.util.UUID#compareTo) and matches indexes from V16.
+    // the DB, not java.util.UUID#compareTo) and matches indexes from V16. Every list hides what blocks/mutes hide
+    // from {@code viewerId} ({@link #LISTED_FOR_VIEWER}).
 
-    /** Every post, newest first, strictly after {@code (createdAt, id)}. */
+    /** Every post visible to {@code viewerId}, newest first, strictly after {@code (createdAt, id)}. */
     @Query(value = """
             SELECT p.* FROM posts p
             WHERE (p.created_at, p.id) < (CAST(:createdAt AS timestamptz), CAST(:id AS uuid))
+              AND """ + LISTED_FOR_VIEWER + """
+
             ORDER BY p.created_at DESC, p.id DESC
             LIMIT :limit""", nativeQuery = true)
-    List<Post> findPageAfter(@Param("createdAt") Instant createdAt, @Param("id") UUID id,
-                             @Param("limit") int limit);
+    List<Post> findPageAfter(@Param("viewerId") UUID viewerId, @Param("createdAt") Instant createdAt,
+                             @Param("id") UUID id, @Param("limit") int limit);
 
     /**
      * Posts by {@code viewerId} or by users {@code viewerId} actively follows (Feed's {@code follows}
-     * projection), newest first, strictly after {@code (createdAt, id)}.
+     * projection), newest first, strictly after {@code (createdAt, id)}; muted followees are hidden too.
      */
     @Query(value = """
             SELECT p.* FROM posts p
@@ -52,40 +86,49 @@ public interface PostRepository extends JpaRepository<Post, UUID> {
                                   UNION ALL
                                   SELECT CAST(:viewerId AS uuid))
               AND (p.created_at, p.id) < (CAST(:createdAt AS timestamptz), CAST(:id AS uuid))
+              AND """ + LISTED_FOR_VIEWER + """
+
             ORDER BY p.created_at DESC, p.id DESC
             LIMIT :limit""", nativeQuery = true)
     List<Post> findFollowingPageAfter(@Param("viewerId") UUID viewerId, @Param("createdAt") Instant createdAt,
                                       @Param("id") UUID id, @Param("limit") int limit);
 
     /**
-     * Posts carrying hashtag {@code tag} (normalised), newest first, strictly after {@code (createdAt, id)}.
-     * Pages over {@code post_hashtags (tag, created_at DESC, post_id DESC)} (V17); its {@code created_at} is a
-     * copy of the post's, so the order and cursor are the same as for {@link #findPageAfter}.
+     * Posts carrying hashtag {@code tag} (normalised) visible to {@code viewerId}, newest first, strictly after
+     * {@code (createdAt, id)}. Pages over {@code post_hashtags (tag, created_at DESC, post_id DESC)} (V17); its
+     * {@code created_at} is a copy of the post's, so the order and cursor are the same as for {@link #findPageAfter}.
      */
     @Query(value = """
             SELECT p.* FROM post_hashtags h JOIN posts p ON p.id = h.post_id
             WHERE h.tag = :tag AND p.type <> 'REPOST'
               AND (h.created_at, h.post_id) < (CAST(:createdAt AS timestamptz), CAST(:id AS uuid))
+              AND """ + LISTED_FOR_VIEWER + """
+
             ORDER BY h.created_at DESC, h.post_id DESC
             LIMIT :limit""", nativeQuery = true)
-    List<Post> findHashtagPageAfter(@Param("tag") String tag, @Param("createdAt") Instant createdAt,
-                                    @Param("id") UUID id, @Param("limit") int limit);
+    List<Post> findHashtagPageAfter(@Param("tag") String tag, @Param("viewerId") UUID viewerId,
+                                    @Param("createdAt") Instant createdAt, @Param("id") UUID id,
+                                    @Param("limit") int limit);
 
     /**
      * Posts whose own text matches {@code query} (Postgres full-text, {@code simple} configuration, parsed by
      * {@code websearch_to_tsquery}: arbitrary user input is safe - words are ANDed, {@code "phrases"}, {@code or}
-     * and {@code -excluded} work), newest first, strictly after {@code (createdAt, id)}. REPOSTs carry no text.
-     * Uses {@code ix_posts_content_fts} (V23); the ordering and cursor are the same as for {@link #findPageAfter}.
+     * and {@code -excluded} work), visible to {@code viewerId}, newest first, strictly after {@code (createdAt, id)}.
+     * REPOSTs carry no text. Uses {@code ix_posts_content_fts} (V23); the ordering and cursor are the same as for
+     * {@link #findPageAfter}.
      */
     @Query(value = """
             SELECT p.* FROM posts p
             WHERE to_tsvector('simple', p.content) @@ websearch_to_tsquery('simple', :query)
               AND p.type <> 'REPOST'
               AND (p.created_at, p.id) < (CAST(:createdAt AS timestamptz), CAST(:id AS uuid))
+              AND """ + LISTED_FOR_VIEWER + """
+
             ORDER BY p.created_at DESC, p.id DESC
             LIMIT :limit""", nativeQuery = true)
-    List<Post> findSearchPageAfter(@Param("query") String query, @Param("createdAt") Instant createdAt,
-                                   @Param("id") UUID id, @Param("limit") int limit);
+    List<Post> findSearchPageAfter(@Param("query") String query, @Param("viewerId") UUID viewerId,
+                                   @Param("createdAt") Instant createdAt, @Param("id") UUID id,
+                                   @Param("limit") int limit);
 
     // ── Reposts / quotes (stage 2C) ─────────────────────────────────────────
 

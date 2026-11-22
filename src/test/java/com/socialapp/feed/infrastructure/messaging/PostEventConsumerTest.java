@@ -36,7 +36,9 @@ class PostEventConsumerTest {
             mock(com.socialapp.feed.application.media.MediaStorage.class);
     private final PostService postService = new PostService(posts, reactions, mock(CommentRepository.class),
             mock(CommentReactionRepository.class), profiles, hashtags, mentions,
-            mock(BookmarkRepository.class), media, storage);
+            mock(BookmarkRepository.class), media, storage,
+            new com.socialapp.feed.application.usecase.PostVisibility(
+                    mock(com.socialapp.feed.domain.BlockMuteRepository.class), posts));
     private final PostEventConsumer consumer = new PostEventConsumer(sse, profiles, posts, postService);
 
     private FeedSseService.PostSsePayload broadcastOf(PostCreatedEvent event) {

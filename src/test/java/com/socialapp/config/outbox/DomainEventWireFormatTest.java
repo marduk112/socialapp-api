@@ -52,7 +52,12 @@ class DomainEventWireFormatTest {
                 new UserFollowedEvent(A, MILLIS, B, C),
                 new UserUnfollowedEvent(A, NANOS, B, C),
                 new CommentCreatedEvent(A, NANOS, B, C, D, E, A, B, "alice", "c"),
-                new CommentCreatedEvent(A, WHOLE, B, C, D, null, null, B, "alice", "c"));
+                new CommentCreatedEvent(A, WHOLE, B, C, D, null, null, B, "alice", "c"),
+                // stage 5A (new types, pinned from their first version)
+                new UserBlockedEvent(A, MILLIS, B, C),
+                new UserUnblockedEvent(A, NANOS, B, C),
+                new UserMutedEvent(A, WHOLE, B, C),
+                new UserUnmutedEvent(A, MILLIS, B, C));
     }
 
     private static List<String> golden() {
@@ -67,7 +72,11 @@ class DomainEventWireFormatTest {
                 "{\"eventType\":\"UserFollowedEvent\",\"eventId\":\"00000000-0000-0000-0000-00000000000a\",\"occurredAt\":1767323045.006000000,\"followerId\":\"00000000-0000-0000-0000-00000000000b\",\"followeeId\":\"00000000-0000-0000-0000-00000000000c\"}",
                 "{\"eventType\":\"UserUnfollowedEvent\",\"eventId\":\"00000000-0000-0000-0000-00000000000a\",\"occurredAt\":1767323045.123456789,\"followerId\":\"00000000-0000-0000-0000-00000000000b\",\"followeeId\":\"00000000-0000-0000-0000-00000000000c\"}",
                 "{\"eventType\":\"CommentCreatedEvent\",\"eventId\":\"00000000-0000-0000-0000-00000000000a\",\"occurredAt\":1767323045.123456789,\"commentId\":\"00000000-0000-0000-0000-00000000000b\",\"postId\":\"00000000-0000-0000-0000-00000000000c\",\"postAuthorId\":\"00000000-0000-0000-0000-00000000000d\",\"parentCommentId\":\"00000000-0000-0000-0000-00000000000e\",\"parentCommentAuthorId\":\"00000000-0000-0000-0000-00000000000a\",\"authorId\":\"00000000-0000-0000-0000-00000000000b\",\"authorUsername\":\"alice\",\"contentSnippet\":\"c\"}",
-                "{\"eventType\":\"CommentCreatedEvent\",\"eventId\":\"00000000-0000-0000-0000-00000000000a\",\"occurredAt\":1767323045.000000000,\"commentId\":\"00000000-0000-0000-0000-00000000000b\",\"postId\":\"00000000-0000-0000-0000-00000000000c\",\"postAuthorId\":\"00000000-0000-0000-0000-00000000000d\",\"parentCommentId\":null,\"parentCommentAuthorId\":null,\"authorId\":\"00000000-0000-0000-0000-00000000000b\",\"authorUsername\":\"alice\",\"contentSnippet\":\"c\"}");
+                "{\"eventType\":\"CommentCreatedEvent\",\"eventId\":\"00000000-0000-0000-0000-00000000000a\",\"occurredAt\":1767323045.000000000,\"commentId\":\"00000000-0000-0000-0000-00000000000b\",\"postId\":\"00000000-0000-0000-0000-00000000000c\",\"postAuthorId\":\"00000000-0000-0000-0000-00000000000d\",\"parentCommentId\":null,\"parentCommentAuthorId\":null,\"authorId\":\"00000000-0000-0000-0000-00000000000b\",\"authorUsername\":\"alice\",\"contentSnippet\":\"c\"}",
+                "{\"eventType\":\"UserBlockedEvent\",\"eventId\":\"00000000-0000-0000-0000-00000000000a\",\"occurredAt\":1767323045.006000000,\"blockerId\":\"00000000-0000-0000-0000-00000000000b\",\"blockedId\":\"00000000-0000-0000-0000-00000000000c\"}",
+                "{\"eventType\":\"UserUnblockedEvent\",\"eventId\":\"00000000-0000-0000-0000-00000000000a\",\"occurredAt\":1767323045.123456789,\"blockerId\":\"00000000-0000-0000-0000-00000000000b\",\"blockedId\":\"00000000-0000-0000-0000-00000000000c\"}",
+                "{\"eventType\":\"UserMutedEvent\",\"eventId\":\"00000000-0000-0000-0000-00000000000a\",\"occurredAt\":1767323045.000000000,\"muterId\":\"00000000-0000-0000-0000-00000000000b\",\"mutedId\":\"00000000-0000-0000-0000-00000000000c\"}",
+                "{\"eventType\":\"UserUnmutedEvent\",\"eventId\":\"00000000-0000-0000-0000-00000000000a\",\"occurredAt\":1767323045.006000000,\"muterId\":\"00000000-0000-0000-0000-00000000000b\",\"mutedId\":\"00000000-0000-0000-0000-00000000000c\"}");
     }
 
     @Test

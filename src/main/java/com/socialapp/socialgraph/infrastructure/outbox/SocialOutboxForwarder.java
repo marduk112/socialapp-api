@@ -2,8 +2,12 @@ package com.socialapp.socialgraph.infrastructure.outbox;
 
 import com.socialapp.config.outbox.OutboxImporter;
 import com.socialapp.shared.events.DomainEvent;
+import com.socialapp.shared.events.UserBlockedEvent;
 import com.socialapp.shared.events.UserFollowedEvent;
+import com.socialapp.shared.events.UserMutedEvent;
+import com.socialapp.shared.events.UserUnblockedEvent;
 import com.socialapp.shared.events.UserUnfollowedEvent;
+import com.socialapp.shared.events.UserUnmutedEvent;
 import com.socialapp.socialgraph.application.usecase.FollowGraphChanged;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -156,11 +160,15 @@ public class SocialOutboxForwarder {
         try {
             var eventId = UUID.fromString(p.eventId());
             var occurredAt = Instant.ofEpochMilli(p.occurredAt());
-            var follower = UUID.fromString(p.followerId());
-            var followee = UUID.fromString(p.followeeId());
+            var source = UUID.fromString(p.sourceId());
+            var target = UUID.fromString(p.targetId());
             return switch (p.type()) {
-                case "UserFollowedEvent" -> new UserFollowedEvent(eventId, occurredAt, follower, followee);
-                case "UserUnfollowedEvent" -> new UserUnfollowedEvent(eventId, occurredAt, follower, followee);
+                case "UserFollowedEvent" -> new UserFollowedEvent(eventId, occurredAt, source, target);
+                case "UserUnfollowedEvent" -> new UserUnfollowedEvent(eventId, occurredAt, source, target);
+                case "UserBlockedEvent" -> new UserBlockedEvent(eventId, occurredAt, source, target);
+                case "UserUnblockedEvent" -> new UserUnblockedEvent(eventId, occurredAt, source, target);
+                case "UserMutedEvent" -> new UserMutedEvent(eventId, occurredAt, source, target);
+                case "UserUnmutedEvent" -> new UserUnmutedEvent(eventId, occurredAt, source, target);
                 default -> throw new IllegalArgumentException("unknown type " + p.type());
             };
         } catch (RuntimeException e) { // incl. NPE for missing properties

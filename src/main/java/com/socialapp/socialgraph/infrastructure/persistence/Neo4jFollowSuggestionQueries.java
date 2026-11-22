@@ -18,6 +18,7 @@ class Neo4jFollowSuggestionQueries implements FollowSuggestionQueries {
     private static final String FRIENDS_OF_FRIENDS = """
             MATCH (me:User {userId: $viewerId})-[:FOLLOWS]->(f:User)-[:FOLLOWS]->(s:User)
             WHERE s <> me AND s.username IS NOT NULL AND NOT EXISTS { (me)-[:FOLLOWS]->(s) }
+              AND NOT EXISTS { (me)-[:BLOCKS|MUTES]->(s) } AND NOT EXISTS { (s)-[:BLOCKS]->(me) }
             RETURN s.userId AS userId, s.username AS username, s.avatarUrl AS avatarUrl,
                    count(DISTINCT f) AS mutual
             ORDER BY mutual DESC, username ASC, userId ASC
@@ -27,7 +28,8 @@ class Neo4jFollowSuggestionQueries implements FollowSuggestionQueries {
     private static final String MOST_FOLLOWED = """
             MATCH (s:User)
             WHERE s.userId <> $viewerId AND s.username IS NOT NULL AND NOT s.userId IN $excludeIds
-              AND NOT EXISTS { (:User {userId: $viewerId})-[:FOLLOWS]->(s) }
+              AND NOT EXISTS { (:User {userId: $viewerId})-[:FOLLOWS|BLOCKS|MUTES]->(s) }
+              AND NOT EXISTS { (s)-[:BLOCKS]->(:User {userId: $viewerId}) }
             RETURN s.userId AS userId, s.username AS username, s.avatarUrl AS avatarUrl,
                    0 AS mutual, COUNT { (s)<-[:FOLLOWS]-(:User) } AS followers
             ORDER BY followers DESC, username ASC, userId ASC

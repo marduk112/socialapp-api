@@ -1,5 +1,8 @@
 package com.socialapp.usermanagement.infrastructure.persistence;
 
+import com.socialapp.shared.events.UserBlockedEvent;
+import com.socialapp.shared.events.UserUnblockedEvent;
+import com.socialapp.usermanagement.application.usecase.UserBlockProjection;
 import com.socialapp.usermanagement.domain.User;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -12,7 +15,9 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
+import java.time.Instant;
 import java.util.List;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -20,7 +25,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 @DataJpaTest
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @Testcontainers(disabledWithoutDocker = true)
-@Import(UserPersistenceAdapter.class)
+@Import({UserPersistenceAdapter.class, JdbcUserBlockRepository.class, UserBlockProjection.class})
 class UserSearchPostgresTest {
 
     @Container
@@ -34,13 +39,22 @@ class UserSearchPostgresTest {
     }
 
     @Autowired UserPersistenceAdapter users;
+    @Autowired UserBlockProjection blocks;
 
-    private void user(String username) {
-        users.save(User.register(username, username.toLowerCase() + "@test.com", "hash", null));
+    /** A searcher without any block. */
+    private static final UUID VIEWER = UUID.randomUUID();
+    private static final Instant T0 = Instant.parse("2026-11-20T10:00:00Z");
+
+    private User user(String username) {
+        return users.save(User.register(username, username.toLowerCase() + "@test.com", "hash", null));
     }
 
     private List<String> search(String term, int limit) {
-        return users.searchByUsername(term, limit).stream().map(User::getUsername).toList();
+        return search(term, VIEWER, limit);
+    }
+
+    private List<String> search(String term, UUID viewer, int limit) {
+        return users.searchByUsername(term, viewer, limit).stream().map(User::getUsername).toList();
     }
 
     @Test
@@ -81,9 +95,51 @@ class UserSearchPostgresTest {
     void neverExposesAnythingBeyondTheMatchedUsers() {
         user("dave");
 
-        var found = users.searchByUsername("dav", 10);
+        var found = users.searchByUsername("dav", VIEWER, 10);
 
         assertThat(found).hasSize(1);
         assertThat(found.get(0).getUsername()).isEqualTo("dave");
+    }
+
+    // ── Blocks (stage 5A) ───────────────────────────────────────────────────
+
+    @Test
+    void blockedUsersAreHiddenFromBothSides_untilUnblocked() {
+        var alice = user("zed_alice");
+        var bob = user("zed_bob");
+        user("zed_carol");
+
+        blocks.on(new UserBlockedEvent(UUID.randomUUID(), T0, alice.getId(), bob.getId()));
+
+        assertThat(search("zed", alice.getId(), 10)).containsExactly("zed_alice", "zed_carol");
+        assertThat(search("zed", bob.getId(), 10)).containsExactly("zed_bob", "zed_carol");
+        assertThat(search("zed", 10)).containsExactly("zed_alice", "zed_bob", "zed_carol");
+
+        blocks.on(new UserUnblockedEvent(UUID.randomUUID(), T0.plusSeconds(1), alice.getId(), bob.getId()));
+
+        assertThat(search("zed", alice.getId(), 10)).containsExactly("zed_alice", "zed_bob", "zed_carol");
+        assertThat(search("zed", bob.getId(), 10)).containsExactly("zed_alice", "zed_bob", "zed_carol");
+    }
+
+    @Test
+    void blockProjectionIsIdempotentAndOrderTolerant() {
+        var alice = user("yy_alice");
+        var bob = user("yy_bob");
+        var block = new UserBlockedEvent(UUID.randomUUID(), T0, alice.getId(), bob.getId());
+        var unblock = new UserUnblockedEvent(UUID.randomUUID(), T0.plusSeconds(1), alice.getId(), bob.getId());
+
+        // newest first, then the older block and a redelivery: the unblock (tombstone) wins
+        assertThat(blocks.on(unblock)).isTrue();
+        assertThat(blocks.on(block)).isFalse();
+        assertThat(blocks.on(unblock)).isFalse();
+        assertThat(search("yy", alice.getId(), 10)).containsExactly("yy_alice", "yy_bob");
+
+        // a newer block applies; its redelivery does not
+        var again = new UserBlockedEvent(UUID.randomUUID(), T0.plusSeconds(2), alice.getId(), bob.getId());
+        assertThat(blocks.on(again)).isTrue();
+        assertThat(blocks.on(again)).isFalse();
+        assertThat(search("yy", alice.getId(), 10)).containsExactly("yy_alice");
+        // malformed (self) events are dropped
+        assertThat(blocks.on(new UserBlockedEvent(UUID.randomUUID(), T0, alice.getId(), alice.getId()))).isFalse();
     }
 }

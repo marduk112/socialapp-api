@@ -18,7 +18,8 @@ public interface UserRepository {
 
     /**
      * Users whose username contains {@code term} (case-insensitive, literal: LIKE wildcards in {@code term} are
-     * not special), best first: exact match, then prefix, then the rest by username; at most {@code limit}.
+     * not special), best first: exact match, then prefix, then the rest by username; at most {@code limit}. Users
+     * {@code viewerId} blocks or is blocked by are left out (stage 5A).
      */
-    List<User> searchByUsername(String term, int limit);
+    List<User> searchByUsername(String term, UUID viewerId, int limit);
 }

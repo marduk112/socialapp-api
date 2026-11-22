@@ -29,6 +29,10 @@ import java.util.UUID;
  * <p>Each {@code on(...)} handler is one transaction and returns the notifications that have just become visible
  * (new or resurrected), read back with the actor's display data, so the caller can push them live AFTER commit.
  * Events older than {@link NotificationCutoff#since()} are ignored (no historic notifications).
+ *
+ * <p>Stage 5A: an action of someone the recipient blocks, is blocked by or mutes creates no notification
+ * ({@link NotificationPolicy#withoutSuppressed}, against {@link ActorRestrictions}); existing ones are hidden by the read
+ * queries while the block/mute lasts and come back after an unblock/unmute.
  */
 @Service
 @RequiredArgsConstructor
@@ -43,6 +47,7 @@ public class NotificationService {
     private final NotificationRepository repository;
     private final NotificationQueries queries;
     private final NotificationCutoff cutoff;
+    private final ActorRestrictions restrictions;
 
     // ── Event handlers ─────────────────────────────────────────────────────────
 
@@ -90,7 +95,9 @@ public class NotificationService {
         return occurredAt == null || occurredAt.isBefore(cutoff.since());
     }
 
-    private List<NotificationView> apply(List<NotificationIntent> intents) {
+    private List<NotificationView> apply(List<NotificationIntent> decided) {
+        if (decided.isEmpty()) return List.of();
+        var intents = NotificationPolicy.withoutSuppressed(decided, restrictions::suppresses);
         if (intents.isEmpty()) return List.of();
         List<UUID> visible = new ArrayList<>();
         for (var intent : intents) {

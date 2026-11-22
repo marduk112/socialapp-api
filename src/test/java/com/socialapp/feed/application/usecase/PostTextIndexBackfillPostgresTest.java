@@ -45,7 +45,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 @DataJpaTest
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @Testcontainers(disabledWithoutDocker = true)
-@Import({PostService.class, TextIndexAdapters.class, BackfillStateRepository.class, com.socialapp.feed.infrastructure.media.MediaAdapters.class})
+@Import({PostService.class, com.socialapp.feed.infrastructure.persistence.BlockMuteAdapters.class, TextIndexAdapters.class, BackfillStateRepository.class, com.socialapp.feed.infrastructure.media.MediaAdapters.class})
 @Transactional(propagation = Propagation.NOT_SUPPORTED) // the backfill commits its own batches
 class PostTextIndexBackfillPostgresTest {
 

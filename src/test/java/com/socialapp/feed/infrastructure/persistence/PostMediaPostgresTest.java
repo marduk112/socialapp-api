@@ -48,7 +48,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @Testcontainers(disabledWithoutDocker = true)
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
-@Import({PostService.class, TimelineService.class, MediaService.class, JdbcPostHashtagRepository.class,
+@Import({PostService.class, BlockMuteAdapters.class, TimelineService.class, MediaService.class, JdbcPostHashtagRepository.class,
         JdbcPostMentionRepository.class, MediaAdapters.class, RepostPostgresTest.StatementCounting.class})
 class PostMediaPostgresTest {
 

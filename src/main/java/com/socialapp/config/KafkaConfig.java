@@ -81,7 +81,7 @@ public class KafkaConfig {
         return TopicBuilder.name(reactionEventsTopic).partitions(PARTITIONS).replicas(1).build();
     }
 
-    /** Follow graph changes (UserFollowed/UserUnfollowed), key = followerId. */
+    /** Social graph changes: follows (key followerId), blocks (key blockerId) and mutes (key muterId). */
     @Bean
     public NewTopic socialEventsTopic() {
         return TopicBuilder.name(socialEventsTopic).partitions(PARTITIONS).replicas(1).build();
@@ -241,10 +241,16 @@ public class KafkaConfig {
         return containerFactory(DomainEvent.class, "feed-avatar-group");
     }
 
-    /** Feed: social-events -> follows projection (following timeline). */
+    /** Feed: social-events -> follows (following timeline) and block/mute projections. */
     @Bean
     public ConcurrentKafkaListenerContainerFactory<String, DomainEvent> feedSocialEventListenerContainerFactory() {
         return containerFactory(DomainEvent.class, "feed-follows-group");
+    }
+
+    /** UserManagement: social-events -> user_blocks projection (people search, stage 5A). */
+    @Bean
+    public ConcurrentKafkaListenerContainerFactory<String, DomainEvent> userBlocksSocialEventListenerContainerFactory() {
+        return containerFactory(DomainEvent.class, "user-blocks-group");
     }
 
     // Notification BC: one listener + group per topic (group ids also on the @KafkaListener annotations).
@@ -255,7 +261,7 @@ public class KafkaConfig {
         return containerFactory(DomainEvent.class, "notification-users-group");
     }
 
-    /** Notification: social-events -> FOLLOW. */
+    /** Notification: social-events -> FOLLOW, block/mute projection. */
     @Bean
     public ConcurrentKafkaListenerContainerFactory<String, DomainEvent> notificationSocialEventListenerContainerFactory() {
         return containerFactory(DomainEvent.class, "notification-social-group");

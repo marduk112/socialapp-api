@@ -5,9 +5,13 @@ import com.socialapp.shared.events.CommentCreatedEvent;
 import com.socialapp.shared.events.DomainEvent;
 import com.socialapp.shared.events.PostCreatedEvent;
 import com.socialapp.shared.events.ReactionEvent;
+import com.socialapp.shared.events.UserBlockedEvent;
 import com.socialapp.shared.events.UserCreatedEvent;
 import com.socialapp.shared.events.UserFollowedEvent;
+import com.socialapp.shared.events.UserMutedEvent;
+import com.socialapp.shared.events.UserUnblockedEvent;
 import com.socialapp.shared.events.UserUnfollowedEvent;
+import com.socialapp.shared.events.UserUnmutedEvent;
 import com.socialapp.shared.events.UserUpdatedEvent;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -47,6 +51,10 @@ public class UserEventConsumer {
             case CommentCreatedEvent e -> log.warn("Unexpected CommentCreatedEvent on user-events, ignoring: {}", e.eventId());
             case UserFollowedEvent e -> log.warn("Unexpected UserFollowedEvent on user-events, ignoring: {}", e.eventId());
             case UserUnfollowedEvent e -> log.warn("Unexpected UserUnfollowedEvent on user-events, ignoring: {}", e.eventId());
+            case UserBlockedEvent e -> log.warn("Unexpected UserBlockedEvent on user-events, ignoring: {}", e.eventId());
+            case UserUnblockedEvent e -> log.warn("Unexpected UserUnblockedEvent on user-events, ignoring: {}", e.eventId());
+            case UserMutedEvent e -> log.warn("Unexpected UserMutedEvent on user-events, ignoring: {}", e.eventId());
+            case UserUnmutedEvent e -> log.warn("Unexpected UserUnmutedEvent on user-events, ignoring: {}", e.eventId());
         }
     }
 }

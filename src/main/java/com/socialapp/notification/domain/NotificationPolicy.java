@@ -19,6 +19,7 @@ import java.util.UUID;
  *       a QUOTE).</li>
  *   <li>Dislikes never notify; an unlike / unfollow becomes a retraction of the LIKE / FOLLOW.</li>
  *   <li>Facts with missing ids (impossible for events produced by this system) yield nothing.</li>
+ *   <li>Stage 5A: nobody is notified of an actor they block, are blocked by or mute ({@link #withoutSuppressed}).</li>
  * </ul>
  * Deduplication across events (redelivery, like/unlike toggling, re-reposting) is the job of {@link Notification}.
  */
@@ -89,6 +90,18 @@ public final class NotificationPolicy {
         if (f.postId() == null) return List.of();
         c.add(f.targetOwnerId(), NotificationType.LIKE, target, f.postId(), f.commentId(), f.snippet(), !f.added());
         return c.result();
+    }
+
+    /**
+     * Stage 5A: drops the intents that would notify a recipient of an actor it must not hear from ({@code suppressed}:
+     * a block in either direction, or the recipient mutes the actor). Retractions are kept: undoing an old like or follow
+     * must still retract it, so it does not come back after an unblock/unmute.
+     */
+    public static List<NotificationIntent> withoutSuppressed(List<NotificationIntent> intents,
+                                                             java.util.function.BiPredicate<UUID, UUID> suppressed) {
+        return intents.stream()
+                .filter(i -> i.retraction() || !suppressed.test(i.recipientId(), i.actorId()))
+                .toList();
     }
 
     /** Collects at most one intent per recipient, in precedence order (first added wins), skipping the actor. */

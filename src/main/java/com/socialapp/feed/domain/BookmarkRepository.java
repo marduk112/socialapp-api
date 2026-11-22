@@ -35,14 +35,17 @@ public interface BookmarkRepository extends JpaRepository<Bookmark, Bookmark.Key
 
     /**
      * The user's bookmarks, newest first (created_at DESC, post_id DESC), strictly after
-     * {@code (createdAt, postId)}; index V21.
+     * {@code (createdAt, postId)}; index V21. Bookmarks of posts hidden by a block (either direction, stage 5A) are
+     * skipped in SQL, before the LIMIT, so pages stay exact; they reappear after an unblock (rows are kept).
      */
     @Query(value = """
-            SELECT b.* FROM bookmarks b
-            WHERE b.user_id = :userId
+            SELECT b.* FROM bookmarks b JOIN posts p ON p.id = b.post_id
+            WHERE b.user_id = :viewerId
               AND (b.created_at, b.post_id) < (CAST(:createdAt AS timestamptz), CAST(:postId AS uuid))
+              AND """ + PostRepository.NOT_BLOCKED_FOR_VIEWER + """
+
             ORDER BY b.created_at DESC, b.post_id DESC
             LIMIT :limit""", nativeQuery = true)
-    List<Bookmark> findPageAfter(@Param("userId") UUID userId, @Param("createdAt") Instant createdAt,
+    List<Bookmark> findPageAfter(@Param("viewerId") UUID userId, @Param("createdAt") Instant createdAt,
                                  @Param("postId") UUID postId, @Param("limit") int limit);
 }

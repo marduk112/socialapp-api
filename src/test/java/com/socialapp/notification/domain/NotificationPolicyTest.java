@@ -177,4 +177,23 @@ class NotificationPolicyTest {
                 "  \n ", T));
         assertThat(blank.get(0).snippet()).isNull();
     }
+
+    // ── Blocks / mutes (stage 5A) ───────────────────────────────────────────
+
+    @Test
+    void suppressedPairsGetNoNotification_butRetractionsAlwaysPass() {
+        var comment = NotificationPolicy.commentCreated(new CommentFact(COMMENT, POST, BOB, PARENT, CAROL, ALICE,
+                "alice", "hi", T)); // REPLY to carol + COMMENT to bob
+        java.util.function.BiPredicate<UUID, UUID> bobSuppressesAlice = (recipient, actor) ->
+                recipient.equals(BOB) && actor.equals(ALICE);
+
+        assertThat(NotificationPolicy.withoutSuppressed(comment, bobSuppressesAlice))
+                .extracting(NotificationIntent::recipientId).containsExactly(CAROL);
+
+        var unlike = NotificationPolicy.reaction(new ReactionFact(true, false, POST, null, BOB, ALICE, "p", T));
+        assertThat(NotificationPolicy.withoutSuppressed(unlike, bobSuppressesAlice)).isEqualTo(unlike);
+        var like = NotificationPolicy.reaction(new ReactionFact(true, true, POST, null, BOB, ALICE, "p", T));
+        assertThat(NotificationPolicy.withoutSuppressed(like, bobSuppressesAlice)).isEmpty();
+        assertThat(NotificationPolicy.withoutSuppressed(like, (r, a) -> false)).isEqualTo(like);
+    }
 }

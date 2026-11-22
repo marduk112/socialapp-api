@@ -41,8 +41,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @DataJpaTest
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @Testcontainers(disabledWithoutDocker = true)
-@Import({PostService.class, TimelineService.class, JdbcPostHashtagRepository.class, JdbcPostMentionRepository.class, com.socialapp.feed.infrastructure.media.MediaAdapters.class})
+@Import({PostService.class, BlockMuteAdapters.class, TimelineService.class, JdbcPostHashtagRepository.class, JdbcPostMentionRepository.class, com.socialapp.feed.infrastructure.media.MediaAdapters.class})
 class PostTextIndexPostgresTest {
+
+    /** A viewer without any block or mute. */
+    private static final java.util.UUID VIEWER = java.util.UUID.randomUUID();
 
     @Container
     static final PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:18-alpine");
@@ -193,7 +196,7 @@ class PostTextIndexPostgresTest {
         List<UUID> seen = new ArrayList<>();
         FeedCursor cursor = null;
         for (int i = 0; i < 100; i++) {
-            var page = timeline.hashtagPage(tag, cursor, size);
+            var page = timeline.hashtagPage(VIEWER, tag, cursor, size);
             page.posts().forEach(p -> seen.add(p.getId()));
             if (page.next() == null) return seen;
             assertThat(page.posts()).hasSize(size);
@@ -212,7 +215,7 @@ class PostTextIndexPostgresTest {
     void unknownTagIsOneEmptyLastPage() {
         taggedPost(T0, "other");
 
-        var page = timeline.hashtagPage("nope", null, 20);
+        var page = timeline.hashtagPage(VIEWER, "nope", null, 20);
 
         assertThat(page.posts()).isEmpty();
         assertThat(page.next()).isNull();
@@ -246,9 +249,9 @@ class PostTextIndexPostgresTest {
     void lastPageHasNullCursor_exactMultipleNeedsNoExtraPage() {
         for (int i = 0; i < 4; i++) taggedPost(T0.plusSeconds(i), "four");
 
-        var first = timeline.hashtagPage("four", null, 2);
-        var second = timeline.hashtagPage("four", first.next(), 2);
-        var partial = timeline.hashtagPage("four", timeline.hashtagPage("four", null, 3).next(), 3);
+        var first = timeline.hashtagPage(VIEWER, "four", null, 2);
+        var second = timeline.hashtagPage(VIEWER, "four", first.next(), 2);
+        var partial = timeline.hashtagPage(VIEWER, "four", timeline.hashtagPage(VIEWER, "four", null, 3).next(), 3);
 
         assertThat(first.next()).isNotNull();
         assertThat(second.posts()).hasSize(2);
