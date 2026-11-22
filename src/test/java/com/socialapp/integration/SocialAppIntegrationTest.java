@@ -840,7 +840,8 @@ class SocialAppIntegrationTest {
         assertThat(containers).extracting(c -> c.getGroupId()).containsExactlyInAnyOrder(
                 "social-graph-group", "feed-avatar-group", "feed-sse-group", "feed-follows-group",
                 "notification-users-group", "notification-social-group", "notification-posts-group",
-                "notification-reactions-group", "notification-comments-group");
+                "notification-reactions-group", "notification-comments-group",
+                "user-blocks-group"); // stage 5A: UserManagement's block projection (people search)
         for (var container : containers) {
             var factory = (ConsumerFactory<?, ?>) ReflectionTestUtils.getField(container, "consumerFactory");
             assertThat(factory).isNotSameAs(bootDefaultConsumerFactory);
